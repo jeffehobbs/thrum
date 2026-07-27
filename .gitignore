@@ -1,0 +1,6 @@
+build/
+dist/
+Thrum.xcodeproj/
+*.xcworkspace
+.DS_Store
+*.wav

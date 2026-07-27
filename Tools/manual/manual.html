@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Thrum — Instructions</title>
+<style>
+  @page { size: Letter; margin: 16mm 15mm 14mm 15mm; }
+
+  :root {
+    --ink:      #1c1a20;
+    --soft:     #55505e;
+    --faint:    #8b8593;
+    --hair:     #ded8e2;
+    --paper:    #fdfcfa;
+    --amber:    #a9660c;
+    --amberbg:  #fdf3e2;
+    --teal:     #14636b;
+    --violet:   #6c3f8f;
+    --rose:     #a3325a;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  body {
+    margin: 0;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 9.1pt;
+    line-height: 1.44;
+    color: var(--ink);
+    background: var(--paper);
+  }
+
+  .page { break-after: page; }
+  .page:last-child { break-after: auto; }
+
+  /* Nothing should orphan: a row, a table or a callout either fits or moves. */
+  tr, .callout, .pad-anatomy, .lp, .legend { break-inside: avoid; }
+  table { break-inside: auto; }
+  h1, h2, h3, h4 { break-after: avoid; break-inside: avoid; }
+
+  h1 { font-size: 20pt; font-weight: 700; letter-spacing: -0.4pt; margin: 0 0 2pt; }
+  h2 {
+    font-size: 13pt; font-weight: 700; margin: 0 0 3pt;
+    letter-spacing: -0.2pt; color: var(--ink);
+  }
+  h3 {
+    font-size: 7.7pt; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.1pt; color: var(--amber);
+    margin: 12pt 0 4pt; padding-bottom: 2.5pt; border-bottom: 1px solid var(--hair);
+  }
+  h3:first-of-type { margin-top: 8pt; }
+  h4 { font-size: 9.1pt; font-weight: 700; margin: 9pt 0 2pt; }
+
+  p { margin: 0 0 5pt; }
+  .lede { font-size: 10pt; color: var(--soft); line-height: 1.5; margin-bottom: 8pt; }
+  .note { color: var(--soft); }
+  small { font-size: 8.2pt; color: var(--faint); }
+
+  code, .mono { font-family: "SF Mono", Menlo, monospace; font-size: 8.4pt; }
+
+  table { width: 100%; border-collapse: collapse; margin: 3pt 0 7pt; }
+  th {
+    text-align: left; font-size: 7.2pt; text-transform: uppercase;
+    letter-spacing: 0.9pt; color: var(--faint); font-weight: 700;
+    border-bottom: 1.2px solid var(--hair); padding: 0 6pt 2.5pt 0;
+  }
+  td { padding: 3.4pt 6pt 3.4pt 0; border-bottom: 1px solid #f0ecf3; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.k { font-weight: 700; white-space: nowrap; width: 22%; }
+  td.v { font-family: "SF Mono", Menlo, monospace; font-size: 8.2pt; color: var(--amber);
+         white-space: nowrap; width: 13%; }
+  td.n { font-family: "SF Mono", Menlo, monospace; font-size: 8pt; color: var(--faint);
+         white-space: nowrap; width: 9%; }
+
+  .head {
+    display: flex; align-items: flex-start; gap: 13pt;
+    border-bottom: 2.5px solid var(--ink); padding-bottom: 9pt; margin-bottom: 12pt;
+  }
+  .head img { width: 42pt; height: 42pt; }
+  .wordmark { font-size: 15pt; font-weight: 800; letter-spacing: 5pt; }
+  .tagline { font-size: 7.4pt; letter-spacing: 2.2pt; text-transform: uppercase; color: var(--faint); }
+  .pagetag { margin-left: auto; text-align: right; font-size: 7.4pt;
+             letter-spacing: 1.4pt; text-transform: uppercase; color: var(--faint); padding-top: 4pt; }
+
+  /* Cover */
+  .cover { display: flex; flex-direction: column; height: 232mm; }
+  .cover-top { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+  /* drop-shadow follows the PNG's alpha; box-shadow would draw a grey square. */
+  .cover img { width: 132pt; height: 132pt; margin-bottom: 20pt;
+               filter: drop-shadow(0 5pt 16pt rgba(40,24,10,0.30)); }
+  .cover .wordmark { font-size: 34pt; letter-spacing: 15pt; margin-left: 15pt; }
+  .cover .tagline { font-size: 9pt; letter-spacing: 5pt; margin-top: 7pt; }
+  .cover .sub { max-width: 108mm; margin: 20pt auto 0; color: var(--soft); font-size: 10pt; line-height: 1.6; }
+  .cover-foot { border-top: 1px solid var(--hair); padding-top: 8pt;
+                display: flex; justify-content: space-between; font-size: 8pt; color: var(--faint); }
+
+  .callout {
+    background: var(--amberbg); border-left: 2.5pt solid var(--amber);
+    padding: 7pt 10pt; margin: 8pt 0 10pt; font-size: 9pt; line-height: 1.5;
+  }
+  .callout strong { color: var(--amber); }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18pt; }
+
+  /* Launchpad diagram */
+  /* Ten tracks: the row label, the eight grid columns, then the right-hand
+     column of round buttons. Every row must supply exactly ten children or the
+     whole thing staircases. Nine square cells at full text width would also be
+     taller than the page, hence the max-width. */
+  .lp { display: grid; grid-template-columns: 0.5fr repeat(9, 1fr); gap: 2.5pt;
+        max-width: 134mm; margin: 7pt auto 4pt; }
+  .cell {
+    aspect-ratio: 1; border-radius: 4pt; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; font-size: 5.6pt; line-height: 1.15;
+    text-align: center; font-weight: 700; padding: 1pt; border: 1px solid transparent;
+  }
+  .cell .cc { font-family: "SF Mono", Menlo, monospace; font-weight: 400;
+              font-size: 4.8pt; opacity: 0.55; margin-top: 1pt; }
+  .round { border-radius: 50%; }
+  .tone   { background: #fbeed6; border-color: #edd6ab; color: #7a5410; }
+  .tonec  { background: #f6dcae; border-color: #dcbd80; color: #6b460a; }
+  .timb   { background: #e6eef8; border-color: #c7d8ee; color: #274a75; }
+  .tune   { background: #dcf0f0; border-color: #b4dcdc; color: var(--teal); }
+  .mod    { background: #f0e6f7; border-color: #dcc9e8; color: var(--violet); }
+  .modek  { background: #fbe4ec; border-color: #f0c4d5; color: var(--rose); }
+  .top    { background: #ececf1; border-color: #d8d5df; color: #4a4553; }
+  .lad    { background: #e4f2e2; border-color: #c4dfc0; color: #2f5a2a; }
+  .panic  { background: #fadcdc; border-color: #eeb4b4; color: #8f2020; }
+  .logo   { background: #1c1a20; color: #f6c27a; border-color: #1c1a20; }
+  .rowlab { display: flex; align-items: center; justify-content: flex-end;
+            font-size: 6pt; color: var(--faint); padding-right: 3pt; font-weight: 700; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 4pt 14pt; font-size: 7.6pt; color: var(--soft); margin-top: 3pt; }
+  .legend i { display: inline-block; width: 8pt; height: 8pt; border-radius: 2pt;
+              margin-right: 4pt; vertical-align: -1pt; }
+
+  .pad-anatomy { border: 1.2px solid var(--hair); border-radius: 6pt; padding: 9pt 11pt; background: #fff; }
+
+  ul { margin: 3pt 0 7pt; padding-left: 14pt; }
+  li { margin-bottom: 3pt; }
+  .kbd { font-family: "SF Mono", Menlo, monospace; font-size: 8pt;
+         background: #efecf2; border: 1px solid var(--hair); border-radius: 3pt; padding: 0.5pt 3.5pt; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════ COVER ═══════════════════════════ -->
+<section class="page cover">
+  <div class="cover-top">
+    <img src="ICON" alt="">
+    <div class="wordmark">THRUM</div>
+    <div class="tagline">drone instrument</div>
+    <p class="sub">
+      Set a key, a chord and a temperament. That harmony maps onto the Launchpad X,
+      and you build a drone out of it by hand — tones swell in over seconds, hold
+      indefinitely, and ride up and down under your fingers.
+    </p>
+    <p class="sub" style="margin-top:12pt">
+      Made to be improvised over.
+    </p>
+  </div>
+  <div class="cover-foot">
+    <span>Instructions — every control, every key</span>
+    <span>Jeff Hobbs · v1.0</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ ORIENTATION ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div>
+      <div class="wordmark">THRUM</div>
+      <div class="tagline">drone instrument</div>
+    </div>
+    <div class="pagetag">Getting started</div>
+  </div>
+
+  <h1>What this thing is</h1>
+  <p class="lede">
+    A drone is not a chord you play, it is a chord you <em>inhabit</em>. Thrum holds
+    one indefinitely so somebody else can explore it.
+  </p>
+
+  <p>
+    Thrum has thirty-two independent voices, one per pad of the Launchpad's upper
+    grid. A voice is not a note: it has no decay, and letting go of one is a slow
+    fade rather than a note-off. You tap tones in, they bloom over several seconds,
+    and they stay until you take them away.
+  </p>
+  <p>
+    The eight columns of the grid are the <strong>mode</strong> — seven scale degrees plus the
+    octave — and the four rows are four octaves of it. Every pad is in the scale, so
+    nothing you press is wrong. That is the whole point: it should be safe to build
+    a drone without looking.
+  </p>
+
+  <h3>Sixty seconds to a drone</h3>
+  <table>
+    <tr><td class="v">1</td><td>Open Thrum. It starts in <strong>D Dorian</strong> — a Dm7 — in 5-limit just intonation, on the Harmonium timbre.</td></tr>
+    <tr><td class="v">2</td><td>Click <strong>Tanpura</strong> under Voicings. Four tones swell in over about seven seconds.</td></tr>
+    <tr><td class="v">3</td><td>Let it settle for half a minute. It should never sound quite the same twice.</td></tr>
+    <tr><td class="v">4</td><td>Add or remove tones from the grid. ⌥-click one to give it a sitar buzz.</td></tr>
+    <tr><td class="v">5</td><td>When you're done, <span class="kbd">⌘.</span> lets everything go gracefully.</td></tr>
+  </table>
+
+  <h3>Why it doesn't get boring</h3>
+  <p>
+    Every partial of every voice is <strong>two oscillators</strong> offset by a fraction of a
+    hertz. The offsets are in hertz rather than cents on purpose: a 0.3 Hz detune
+    beats three times every ten seconds whether it sits on the fundamental or the
+    eleventh harmonic, so the whole spectrum breathes at one slow rate instead of
+    the top of it going ragged.
+  </p>
+  <p>
+    Every voice's pitch drift, tremolo, filter sweep, pan and sitar swirl run off
+    LFOs whose periods are distinct <strong>prime numbers of seconds</strong> — 11, 13, 17, 19,
+    23 and up. A voice with a 41-second drift and a 67-second filter sweep returns
+    to the same state every 2,747 seconds. Two such voices, effectively never.
+  </p>
+
+  <div class="callout">
+    <strong>One thing worth knowing.</strong> Thrum's reverb can hold a thirty-second tail.
+    After you silence everything with <span class="kbd">⌘.</span> the room keeps ringing for a
+    long time — that is correct, not a stuck note. <strong>PANIC</strong> is the one control that
+    also clears the tail.
+  </div>
+
+  <h3>What you need</h3>
+  <table>
+    <tr><td class="k">Nothing at all</td><td>The whole instrument is playable from the Mac window. The grid on screen mirrors the hardware exactly.</td></tr>
+    <tr><td class="k">Novation Launchpad X</td><td>Recommended. Plug it in and Thrum takes it over automatically — no setup, no template to load. All 81 keys are used.</td></tr>
+    <tr><td class="k">Novation Launch Control</td><td>Optional. Its knobs bind to Thrum's sliders on plug-in. Until then every control lives in the app.</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════════════════════ APP: HARMONY ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 1</div>
+  </div>
+
+  <h1>Top bar</h1>
+  <table>
+    <tr><td class="k">Chord readout</td><td>The current key and chord, e.g. <strong>Dm7</strong>, coloured by mode. Underneath: the mode name, the temperament, and the reference pitch.</td></tr>
+    <tr><td class="k">DSP</td><td>Share of the audio deadline the engine is using, as a decaying peak. Under 10% is normal. If it shows <strong>drops</strong> in red, blocks are being missed and you will hear crackle. Click to reset the tally.</td></tr>
+    <tr><td class="k">Output meter</td><td>Eighteen segments, peak-reading. The top three turn red.</td></tr>
+    <tr><td class="k">Device pills</td><td>Green dot when a Launchpad X or Launch Control is connected. Hot-plugging either is fine.</td></tr>
+  </table>
+
+  <h3>Key</h3>
+  <p>Twelve pitch classes. The tonal centre is always placed at concert pitch; every interval above it comes from the temperament you choose.</p>
+  <table>
+    <tr><td class="k">Octave <span class="v">− 3 +</span></td><td>Register of the root, 1–6. The grid's lowest row sits an octave <em>below</em> this, so the default of 3 puts the bottom row at D2 and the top at D5.</td></tr>
+    <tr><td class="k">A440 / A432</td><td>Reference pitch. A432 lowers everything by about 32 cents; some people find it settles better under a long drone. Sounding tones glide, they don't jump.</td></tr>
+  </table>
+
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 2</div>
+  </div>
+
+  <h1>Mode · Chord</h1>
+  <p>Sixteen modes, each paired with the chord it implies. Picking "Dorian" and picking "m7" are the same act — the chord is what the drone holds, the mode is what the soloist gets to explore over it. Chord tones are lit brighter on the grid than the rest of the scale.</p>
+  <div class="callout">
+    <strong>Changing mode mid-drone is a modulation, not an edit.</strong> Sounding tones glide to
+    their new pitches over half a second rather than jumping. Switching Dorian → Locrian
+    under a held chord is a legitimate performance move.
+  </div>
+
+  <table>
+    <tr><th>Bank A — diatonic core</th><th>Chord</th><th>Degrees</th></tr>
+    <tr><td class="k">Ionian</td><td class="v">maj7</td><td class="n">1 9 3 11 5 13 7</td></tr>
+    <tr><td class="k">Dorian</td><td class="v">m7</td><td class="n">1 9 ♭3 11 5 13 ♭7</td></tr>
+    <tr><td class="k">Phrygian</td><td class="v">m7♭9</td><td class="n">1 ♭9 ♭3 11 5 ♭13 ♭7</td></tr>
+    <tr><td class="k">Lydian</td><td class="v">maj7♯11</td><td class="n">1 9 3 ♯11 5 13 7</td></tr>
+    <tr><td class="k">Mixolydian</td><td class="v">7</td><td class="n">1 9 3 11 5 13 ♭7</td></tr>
+    <tr><td class="k">Aeolian</td><td class="v">m7</td><td class="n">1 9 ♭3 11 5 ♭13 ♭7</td></tr>
+    <tr><td class="k">Locrian</td><td class="v">m7♭5</td><td class="n">1 ♭9 ♭3 11 ♯11 ♭13 ♭7</td></tr>
+    <tr><td class="k">Harmonic Minor</td><td class="v">mMaj7</td><td class="n">1 9 ♭3 11 5 ♭13 7</td></tr>
+  </table>
+  <table>
+    <tr><th>Bank B — colour</th><th>Chord</th><th>Degrees</th></tr>
+    <tr><td class="k">Lydian Dominant</td><td class="v">7♯11</td><td class="n">1 9 3 ♯11 5 13 ♭7</td></tr>
+    <tr><td class="k">Altered</td><td class="v">7alt</td><td class="n">1 ♭9 ♭3 3 ♯11 ♭13 ♭7</td></tr>
+    <tr><td class="k">Phrygian Dominant</td><td class="v">7♭9♭13</td><td class="n">1 ♭9 3 11 5 ♭13 ♭7</td></tr>
+    <tr><td class="k">Melodic Minor</td><td class="v">mMaj7</td><td class="n">1 9 ♭3 11 5 13 7</td></tr>
+    <tr><td class="k">Whole Tone</td><td class="v">7♯5</td><td class="n">1 9 3 ♯11 ♭13 ♭7 &nbsp;<small>6 notes</small></td></tr>
+    <tr><td class="k">Diminished H–W</td><td class="v">7♭9</td><td class="n">1 ♭9 ♭3 3 ♯11 5 13 ♭7 &nbsp;<small>8</small></td></tr>
+    <tr><td class="k">Minor Pentatonic</td><td class="v">m7</td><td class="n">1 ♭3 11 5 ♭7 &nbsp;<small>5 notes</small></td></tr>
+    <tr><td class="k">Bebop Dominant</td><td class="v">7</td><td class="n">1 9 3 11 5 13 ♭7 7 &nbsp;<small>8</small></td></tr>
+  </table>
+  <p><small>Modes with fewer than eight degrees wrap: the remaining columns continue into the next octave. Modes with eight fill the row exactly.</small></p>
+</section>
+
+<!-- ═══════════════════════════ APP: TEMPERAMENT + TIMBRE ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 3</div>
+  </div>
+
+  <h1>Temperament</h1>
+  <p class="lede">
+    A drone is the one context where tuning is fully exposed. Nothing moves, so
+    beating between intervals is all you hear — which makes just intonation
+    audibly, obviously different rather than a theoretical nicety.
+  </p>
+  <p>
+    Each pad on the grid shows how far its pitch sits from 12-TET, in cents. Changing
+    temperament under a held drone glides.
+  </p>
+
+  <table>
+    <tr><th>System</th><th>3rd / 5th</th><th></th></tr>
+    <tr><td class="k">Just — 5-limit</td><td class="v">+16 / +2</td><td>Small whole-number ratios: 3:2, 5:4, 6:5. Thirds and fifths lock and stop beating entirely. The default, and the reason to own this app.</td></tr>
+    <tr><td class="k">Just — 7-limit</td><td class="v">+16 / +2</td><td>Adds the septimal 7:4 and 7:6. Blue, slightly flat sevenths that sit beautifully under a horn.</td></tr>
+    <tr><td class="k">Pythagorean</td><td class="v">+8 / +2</td><td>Stacked pure fifths. Wide, singing thirds with a bright medieval edge.</td></tr>
+    <tr><td class="k">¼-comma Meantone</td><td class="v">+14 / −3</td><td>Pure 5:4 thirds bought with narrowed fifths. Sweet and old.</td></tr>
+    <tr><td class="k">12-TET</td><td class="v">0 / 0</td><td>The neutral reference. Everything beats a little, nothing is out of place.</td></tr>
+    <tr><td class="k">19-TET</td><td class="v">−5 / −7</td><td>63.2¢ steps. Flat fifths, gorgeous thirds, a distinct minor/augmented split.</td></tr>
+    <tr><td class="k">31-TET</td><td class="v">+3 / −3</td><td>38.7¢ steps — near-perfect meantone with usable septimal intervals.</td></tr>
+    <tr><td class="k">Harmonic Series</td><td class="v">+14 / +2</td><td>Each degree snaps to the nearest partial 16–32 of the root. Overtone-locked, and strange in the upper degrees.</td></tr>
+  </table>
+
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 4</div>
+  </div>
+
+  <h1>Timbre</h1>
+  <p>Eight spectrum recipes, not eight presets of the same knobs. Each has its own partial series, inharmonic stretch, beating bias and filter scaling.</p>
+
+  <table>
+    <tr><th>Timbre</th><th>Partials</th><th></th></tr>
+    <tr><td class="k">Harmonium</td><td class="n">10</td><td>Indian reed organ. Warm odd-leaning spectrum, air behind it, a slow shimmer between the reeds. Speaks quickly.</td></tr>
+    <tr><td class="k">Pipe Organ</td><td class="n">10</td><td>A drawn registration — 16′ 8′ 4′ 2⅔′ 2′ 1⅗′. Stable, wide, church-cold at the top. The least movement of the eight.</td></tr>
+    <tr><td class="k">Shruti Box</td><td class="n">10</td><td>Bellows and free reeds. Dark, thick, and it beats hard — the sound of a room breathing.</td></tr>
+    <tr><td class="k">Bowed Strings</td><td class="n">12</td><td>A full 1/n series under a soft filter. Rosin and horsehair. Slowest swell.</td></tr>
+    <tr><td class="k">Bagpipe Drone</td><td class="n">11</td><td>Cylindrical bore: odd harmonics dominate, evens barely there. Reedy, nasal, relentless.</td></tr>
+    <tr><td class="k">Analog Bloom</td><td class="n">11</td><td>Three-oscillator saw stack under a lazy filter. The 1970s idea of infinity.</td></tr>
+    <tr><td class="k">Glass Choir</td><td class="n">10</td><td>Stretched, hollow, mostly even partials. Sounds like light through a window.</td></tr>
+    <tr><td class="k">Tanpura</td><td class="n">14</td><td>Fourteen partials and a jawari bridge. Buzz is not a defect here, it is the instrument — this one has sitar in it before you arm anything.</td></tr>
+  </table>
+
+  <div class="callout">
+    <strong>Timbres carry a built-in sitar floor.</strong> Tanpura 45%, Bagpipe 14%, Shruti Box 10%,
+    Harmonium 5%, the rest none. That floor adds to whatever you arm per tone, so the
+    Sitar Depth slider does nothing at all on Pipe Organ until you arm a tone, and
+    saturates almost immediately on Tanpura.
+  </div>
+</section>
+
+<!-- ═══════════════════════════ APP: TONES ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 5</div>
+  </div>
+
+  <h1>Tones</h1>
+  <p class="lede">Eight degrees across four octaves — the same 32 pads as the top half of the Launchpad, in the same arrangement.</p>
+
+  <div class="two">
+    <div>
+      <h4>Anatomy of a pad</h4>
+      <div class="pad-anatomy">
+        <table style="margin:0">
+          <tr><td class="k" style="width:38%"><strong>♭3</strong></td><td>Scale degree, relative to the key.</td></tr>
+          <tr><td class="k"><strong>F3</strong></td><td>Note name and octave.</td></tr>
+          <tr><td class="k"><strong>+16¢</strong></td><td>Distance from where 12-TET would put it. Shows <strong>—</strong> when it lands within half a cent.</td></tr>
+          <tr><td class="k">Bar</td><td>That tone's level.</td></tr>
+          <tr><td class="k">Amber outline</td><td>The root of the key.</td></tr>
+          <tr><td class="k">Violet dot + ring</td><td>Jawari armed. A sounding tone with jawari also goes pale rather than saturated.</td></tr>
+        </table>
+      </div>
+    </div>
+    <div>
+      <h4>Gestures</h4>
+      <table>
+        <tr><td class="k">Click</td><td>Swell the tone in at the <em>New Tone Level</em> setting. Click again to let it go — it's a latch, so the second click can come whenever.</td></tr>
+        <tr><td class="k">Drag ↕</td><td>Ride that tone's level live. Drag to the bottom and release to remove it.</td></tr>
+        <tr><td class="k">⌥-click</td><td>Arm or disarm jawari on that tone. Doesn't sound the tone.</td></tr>
+        <tr><td class="k">Hover</td><td>Tooltip with the exact frequency in hertz.</td></tr>
+      </table>
+      <h4>Voicings</h4>
+      <p><small>Each fades whatever is sounding and builds a new stack. A good drone is a specific voicing, not just "the notes of the chord".</small></p>
+    </div>
+  </div>
+
+  <table>
+    <tr><td class="k">Open Fifths</td><td>Root and fifth in three registers. Nothing to argue with — the safest bed under any soloist.</td></tr>
+    <tr><td class="k">Full Chord</td><td>Every chord tone, one per register, spread wide. The most harmonically explicit.</td></tr>
+    <tr><td class="k">Modal Spread</td><td>Chord tones low, colour tones high and quiet. The most to blow over.</td></tr>
+    <tr><td class="k">Tanpura</td><td>The classic 5–1–1–1̇ cycle across all four registers. Weighted heavily to the bottom root.</td></tr>
+    <tr><td class="k">Pedal Root</td><td>One low root and its octave. The strictest tonal centre.</td></tr>
+  </table>
+
+  <h3>Transport</h3>
+  <table>
+    <tr><td class="k">Let go <span class="v">⌘.</span></td><td>Everything fades at the <em>Fade</em> setting. The reverb tail continues.</td></tr>
+    <tr><td class="k">Cut short <span class="v">⇧⌘.</span></td><td>Everything gone in 1.2 seconds. Tail continues.</td></tr>
+    <tr><td class="k">Silence <span class="v">⌘⌫</span></td><td>Immediate. Voices killed, levels zeroed, <strong>and the reverb tail cleared.</strong></td></tr>
+    <tr><td class="k">Menu</td><td>The <strong>Drone</strong> menu also holds all five voicings, <span class="kbd">⌘T</span> next timbre and <span class="kbd">⌘Y</span> next temperament.</td></tr>
+  </table>
+
+  <h3>Status bar</h3>
+  <p>Names whatever you last touched — the note and its exact frequency, the temperament's character, the voicing's intent — then falls back to the current key and reference pitch after a few seconds. On the right, a count of how many tones are holding.</p>
+</section>
+
+<!-- ═══════════════════════════ APP: PARAMETERS ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 6</div>
+  </div>
+
+  <h1>Parameters</h1>
+  <p class="lede">Twenty sliders in four groups. Hovering any of them shows what it does; the value on the right is live.</p>
+
+  <h3>Voice — how a tone behaves</h3>
+  <table>
+    <tr><th>Control</th><th>Range</th><th>Default</th><th></th></tr>
+    <tr><td class="k">Swell</td><td class="v">0.4–40 s</td><td class="n">7 s</td><td>How long a tone takes to bloom to full after you tap it in. Scaled per timbre — reeds speak faster than bowed strings.</td></tr>
+    <tr><td class="k">Fade</td><td class="v">0.4–60 s</td><td class="n">11 s</td><td>How long a tone takes to disappear when you let it go.</td></tr>
+    <tr><td class="k">Beating</td><td class="v">0–100%</td><td class="n">50%</td><td>Detune between each partial's oscillator pair, up to about 1.1 Hz. This is the breathing. At zero the drone goes glassy and still.</td></tr>
+    <tr><td class="k">Drift</td><td class="v">0–100%</td><td class="n">45%</td><td>Slow independent pitch wander per voice, up to ±9 cents, on prime-numbered cycles.</td></tr>
+    <tr><td class="k">Motion</td><td class="v">0–100%</td><td class="n">55%</td><td>Depth of the slow filter, tremolo and panning movement. Nothing should ever be perfectly still.</td></tr>
+    <tr><td class="k">Sitar Depth</td><td class="v">0–100%</td><td class="n">55%</td><td>The jawari amount written to a tone when you arm it — <em>not</em> a global effect. Also updates tones already armed. Explained in full under <em>Jawari</em>.</td></tr>
+    <tr><td class="k">New Tone Level</td><td class="v">0–100%</td><td class="n">72%</td><td>Loudness a tone swells to when you tap it in.</td></tr>
+  </table>
+
+  <h3>Tone — the spectrum</h3>
+  <table>
+    <tr><th>Control</th><th>Range</th><th>Default</th><th></th></tr>
+    <tr><td class="k">Brightness</td><td class="v">0–100%</td><td class="n">52%</td><td>Per-voice lowpass, 320 Hz to 9 kHz, before the slow filter sweep.</td></tr>
+    <tr><td class="k">Warmth</td><td class="v">0–100%</td><td class="n">55%</td><td>Low shelf at 165 Hz, up to +8 dB. The weight under everything.</td></tr>
+    <tr><td class="k">Presence Cut</td><td class="v">0–100%</td><td class="n">60%</td><td>Dip at 3.2 kHz, up to −7 dB. <strong>The most important control here.</strong> Energy around 2–5 kHz is what makes a long drone tiring; this is the guard against it.</td></tr>
+    <tr><td class="k">Air</td><td class="v">0–100%</td><td class="n">40%</td><td>High shelf at 9 kHz, −3 to +5 dB. Soft top, not edge.</td></tr>
+    <tr><td class="k">Saturation</td><td class="v">0–100%</td><td class="n">28%</td><td>Gentle tanh drive ahead of the reverb. Adds the overtones a pure sum of sines can't produce.</td></tr>
+  </table>
+
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 7</div>
+  </div>
+
+  <h1>Parameters, continued</h1>
+
+  <h3>Space — the room</h3>
+  <table>
+    <tr><th>Control</th><th>Range</th><th>Default</th><th></th></tr>
+    <tr><td class="k">Decay</td><td class="v">1–32 s</td><td class="n">14 s</td><td>RT60 of the feedback delay network. Ten to thirty seconds blurs individual events into a continuous field.</td></tr>
+    <tr><td class="k">Wet</td><td class="v">0–100%</td><td class="n">42%</td><td>How much of the tail you hear.</td></tr>
+    <tr><td class="k">Damping</td><td class="v">0–100%</td><td class="n">45%</td><td>High-frequency absorption in the tail. Up is darker and further away.</td></tr>
+    <tr><td class="k">Size</td><td class="v">0.6–1.7</td><td class="n">1.15</td><td>Scales the delay-line lengths. Bigger is slower and more diffuse.</td></tr>
+    <tr><td class="k">Width</td><td class="v">0–2</td><td class="n">1.25</td><td>Mid/side spread. The fundamental stays centred; harmonics open outward. 1 is untouched, 0 is mono.</td></tr>
+    <tr><td class="k">Field Drift</td><td class="v">0–100%</td><td class="n">50%</td><td>A 97-second rotation of the reverb field left to right. You only notice it if you wait.</td></tr>
+  </table>
+
+  <h3>Master</h3>
+  <table>
+    <tr><th>Control</th><th>Range</th><th>Default</th><th></th></tr>
+    <tr><td class="k">Swell Ride</td><td class="v">0–100%</td><td class="n">100%</td><td>Rides everything sounding at once. Live dynamics for the whole drone — the thing to grab when the soloist drops to a whisper.</td></tr>
+    <tr><td class="k">Output</td><td class="v">0–100%</td><td class="n">85%</td><td>Master level, after the limiter.</td></tr>
+  </table>
+
+  <h3>Launch Control panel</h3>
+  <table>
+    <tr><td class="k">Click a name</td><td>Starts MIDI learn for that parameter — move a knob to bind it. The binding persists across launches.</td></tr>
+    <tr><td class="k">Cancel learn</td><td>Abandons a pending learn.</td></tr>
+    <tr><td class="k">Reset map</td><td>Back to the factory layout for whichever model is attached.</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════════════════════ SITAR ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Jawari</div>
+  </div>
+
+  <h1>The sitar control, in detail</h1>
+  <p class="lede">
+    A sitar's bridge is flat and wide, so the string grazes it as it vibrates and
+    sheds a cascade of upper harmonics locked to the fundamental. That grazing is
+    called <em>jawari</em>, and it is the reason a sitar shimmers.
+  </p>
+
+  <h3>It is per-tone, and it is armed rather than dialled</h3>
+  <p>
+    <strong>Sitar Depth is the value written to a tone when you arm it.</strong> With nothing armed,
+    moving the slider does nothing audible. Moving it while tones are armed updates
+    all of them together.
+  </p>
+  <table>
+    <tr><td class="k">In the app</td><td>⌥-click a pad.</td></tr>
+    <tr><td class="k">On the Launchpad</td><td>Hold <strong>SITAR</strong> and tap tones. Pressing into the SITAR pad sets the depth live, from 15% to 100%.</td></tr>
+    <tr><td class="k">By timbre</td><td>Tanpura, Bagpipe, Shruti Box and Harmonium carry a floor that applies to every voice with nothing armed.</td></tr>
+  </table>
+
+  <h3>What the depth actually drives</h3>
+  <p>Three things move together as you raise it:</p>
+  <table>
+    <tr><th>At 0 → 100%</th><th></th></tr>
+    <tr><td class="k">Phaser mix<br><small>0 → 75%</small></td><td>Four cascaded allpass stages whose coefficient is swept by an LFO on a prime-derived period, unique per voice — so no two sitar tones ever swirl together. This is the "slight phase" part.</td></tr>
+    <tr><td class="k">Comb feedback<br><small>0.55 → 0.83</small></td><td>A comb exactly <strong>one period of the fundamental</strong> long, so it reinforces the harmonic series rather than fighting it. This is the sympathetic ring.</td></tr>
+    <tr><td class="k">Buzz mix<br><small>0 → 30%</small></td><td>High-passed at 700 Hz, so only the bright edge is added and none of the mud.</td></tr>
+  </table>
+  <p>Changes glide in over a second or two rather than switching.</p>
+
+  <div class="callout">
+    <strong>Use it on one voice, not all of them.</strong> The effect is per-tone by design. Arm a
+    single high tone and leave the rest clean and you get the tanpura's shimmering
+    top string over a steady bed. Arm everything and it smears.
+  </div>
+
+  <h3>Two honest limitations</h3>
+  <p>
+    The waveshaper is an <em>odd</em> function, so it produces odd harmonics only — 3rd, 5th,
+    7th. A real jawari gives you the whole series, so this reads a little hollow
+    beside the real thing.
+  </p>
+  <p>
+    There is a hard clip inside the comb's feedback loop, needed because the shaper
+    grows with level rather than compressing. Hard clipping produces harmonics above
+    Nyquist that fold back as aliasing, so at high depth on the upper rows you may
+    hear a gritty metallic edge that isn't musical buzz. If it bothers you, keep the
+    depth moderate on the top octave.
+  </p>
+</section>
+
+<!-- ═══════════════════════════ LAUNCHPAD MAP ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Launchpad X · map</div>
+  </div>
+
+  <h1>Every key</h1>
+  <p class="lede">
+    Plug it in and Thrum takes over — programmer mode is set automatically, no
+    template to load. All 81 keys do something.
+  </p>
+
+  <div class="lp">
+    <div></div>
+    <div class="cell round top">KEY ◀<span class="cc">91</span></div>
+    <div class="cell round top">KEY ▶<span class="cc">92</span></div>
+    <div class="cell round top">OCT ◀<span class="cc">93</span></div>
+    <div class="cell round top">OCT ▶<span class="cc">94</span></div>
+    <div class="cell round top">BANK<span class="cc">95</span></div>
+    <div class="cell round top">TIMB<span class="cc">96</span></div>
+    <div class="cell round top">TUNE<span class="cc">97</span></div>
+    <div class="cell round panic">PANIC<span class="cc">98</span></div>
+    <div></div>
+
+    <div class="rowlab">8</div>
+    <div class="cell tonec">1<span class="cc">81</span></div><div class="cell tone">9<span class="cc">82</span></div>
+    <div class="cell tonec">♭3<span class="cc">83</span></div><div class="cell tone">11<span class="cc">84</span></div>
+    <div class="cell tonec">5<span class="cc">85</span></div><div class="cell tone">13<span class="cc">86</span></div>
+    <div class="cell tonec">♭7<span class="cc">87</span></div><div class="cell tonec">1<span class="cc">88</span></div>
+    <div class="cell round lad">100%<span class="cc">89</span></div>
+
+    <div class="rowlab">7</div>
+    <div class="cell tonec">1<span class="cc">71</span></div><div class="cell tone">9<span class="cc">72</span></div>
+    <div class="cell tonec">♭3<span class="cc">73</span></div><div class="cell tone">11<span class="cc">74</span></div>
+    <div class="cell tonec">5<span class="cc">75</span></div><div class="cell tone">13<span class="cc">76</span></div>
+    <div class="cell tonec">♭7<span class="cc">77</span></div><div class="cell tonec">1<span class="cc">78</span></div>
+    <div class="cell round lad">86%<span class="cc">79</span></div>
+
+    <div class="rowlab">6</div>
+    <div class="cell tonec">1<span class="cc">61</span></div><div class="cell tone">9<span class="cc">62</span></div>
+    <div class="cell tonec">♭3<span class="cc">63</span></div><div class="cell tone">11<span class="cc">64</span></div>
+    <div class="cell tonec">5<span class="cc">65</span></div><div class="cell tone">13<span class="cc">66</span></div>
+    <div class="cell tonec">♭7<span class="cc">67</span></div><div class="cell tonec">1<span class="cc">68</span></div>
+    <div class="cell round lad">71%<span class="cc">69</span></div>
+
+    <div class="rowlab">5</div>
+    <div class="cell tonec">1<span class="cc">51</span></div><div class="cell tone">9<span class="cc">52</span></div>
+    <div class="cell tonec">♭3<span class="cc">53</span></div><div class="cell tone">11<span class="cc">54</span></div>
+    <div class="cell tonec">5<span class="cc">55</span></div><div class="cell tone">13<span class="cc">56</span></div>
+    <div class="cell tonec">♭7<span class="cc">57</span></div><div class="cell tonec">1<span class="cc">58</span></div>
+    <div class="cell round lad">57%<span class="cc">59</span></div>
+
+    <div class="rowlab">4</div>
+    <div class="cell timb">HARM<span class="cc">41</span></div><div class="cell timb">ORGAN<span class="cc">42</span></div>
+    <div class="cell timb">SHRUTI<span class="cc">43</span></div><div class="cell timb">BOWED<span class="cc">44</span></div>
+    <div class="cell timb">PIPE<span class="cc">45</span></div><div class="cell timb">ANALOG<span class="cc">46</span></div>
+    <div class="cell timb">GLASS<span class="cc">47</span></div><div class="cell timb">TANP<span class="cc">48</span></div>
+    <div class="cell round lad">43%<span class="cc">49</span></div>
+
+    <div class="rowlab">3</div>
+    <div class="cell tune">JI5<span class="cc">31</span></div><div class="cell tune">JI7<span class="cc">32</span></div>
+    <div class="cell tune">PYTH<span class="cc">33</span></div><div class="cell tune">MEAN<span class="cc">34</span></div>
+    <div class="cell tune">12<span class="cc">35</span></div><div class="cell tune">19<span class="cc">36</span></div>
+    <div class="cell tune">31<span class="cc">37</span></div><div class="cell tune">HARM<span class="cc">38</span></div>
+    <div class="cell round lad">29%<span class="cc">39</span></div>
+
+    <div class="rowlab">2</div>
+    <div class="cell mod">SITAR<span class="cc">21</span></div><div class="cell mod">SWELL<span class="cc">22</span></div>
+    <div class="cell mod">BLOOM<span class="cc">23</span></div><div class="cell mod">AIR<span class="cc">24</span></div>
+    <div class="cell mod">DRIFT<span class="cc">25</span></div><div class="cell mod">WIDE<span class="cc">26</span></div>
+    <div class="cell mod">SAT<span class="cc">27</span></div><div class="cell mod">LET GO<span class="cc">28</span></div>
+    <div class="cell round lad">14%<span class="cc">29</span></div>
+
+    <div class="rowlab">1</div>
+    <div class="cell modek">MODE 1<span class="cc">11</span></div><div class="cell modek">2<span class="cc">12</span></div>
+    <div class="cell modek">3<span class="cc">13</span></div><div class="cell modek">4<span class="cc">14</span></div>
+    <div class="cell modek">5<span class="cc">15</span></div><div class="cell modek">6<span class="cc">16</span></div>
+    <div class="cell modek">7<span class="cc">17</span></div><div class="cell modek">8<span class="cc">18</span></div>
+    <div class="cell round lad">MUTE<span class="cc">19</span></div>
+  </div>
+
+  <div class="legend">
+    <span><i class="tonec" style="border:1px solid #dcbd80"></i>Chord tone</span>
+    <span><i class="tone" style="border:1px solid #edd6ab"></i>Scale tone</span>
+    <span><i class="timb" style="border:1px solid #c7d8ee"></i>Timbre</span>
+    <span><i class="tune" style="border:1px solid #b4dcdc"></i>Temperament</span>
+    <span><i class="mod" style="border:1px solid #dcc9e8"></i>Modifier (hold)</span>
+    <span><i class="modek" style="border:1px solid #f0c4d5"></i>Mode</span>
+    <span><i class="lad" style="border:1px solid #c4dfc0"></i>Output ladder</span>
+    <span><i class="top" style="border:1px solid #d8d5df"></i>Global</span>
+  </div>
+  <p><small>
+    Small numbers are programmer-mode note or CC values. Degree labels on the tone
+    rows show D Dorian; they change with the mode. The logo LED (CC 99) is an output
+    indicator — it breathes with the level and takes no input.
+  </small></p>
+
+  <div class="callout">
+    <strong>The grid tells you what it's doing.</strong> Tone LEDs track the actual envelopes, so a
+    pad brightens as its tone swells in over seven seconds rather than snapping on
+    when you tap it. A tone with jawari armed goes pale instead of saturated.
+  </div>
+</section>
+
+<!-- ═══════════════════════════ LAUNCHPAD DETAIL ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Launchpad X · keys</div>
+  </div>
+
+  <h1>Rows 8–5 · the tones</h1>
+  <p>Thirty-two pads: eight scale degrees across, four octaves up. Row 5 is the lowest, row 8 the highest. Chord tones glow amber when idle, the rest of the scale sits nearly dark.</p>
+  <table>
+    <tr><td class="k">Tap</td><td>Swell the tone in. Tap again to let it go — a latch, so the second tap can come whenever.</td></tr>
+    <tr><td class="k">Press into it</td><td>Aftertouch rides that tone's level, live.</td></tr>
+    <tr><td class="k">Hold SITAR + tap</td><td>Arm or disarm jawari on that tone.</td></tr>
+    <tr><td class="k">Hold LET GO + tap</td><td>Drop that tone outright.</td></tr>
+  </table>
+  <p><small>
+    A "tap" is a release inside 0.45 s with no real pressure behind it. Anything
+    heavier or slower is read as a level ride and leaves the tone where your finger
+    left it — which is why <strong>hold LET GO + tap</strong> exists as an unambiguous kill.
+  </small></p>
+
+  <h1 style="margin-top:16pt">Row 2 · the modifiers</h1>
+  <p>All eight are hold-and-press. They push a parameter while held and put it back on release, so nothing is left somewhere you didn't intend.</p>
+  <table>
+    <tr><th>Pad</th><th>Held</th></tr>
+    <tr><td class="k">SITAR</td><td>Tone pads become jawari toggles. Pressure sets the depth, 15% to 100%.</td></tr>
+    <tr><td class="k">SWELL</td><td>Rides the whole drone up and down, 12% to 100%. Springs back to full on release. The main expressive control.</td></tr>
+    <tr><td class="k">BLOOM</td><td>Opens the reverb — wet, size and decay together, up to a 30-second tail.</td></tr>
+    <tr><td class="k">AIR</td><td>Brightens: voice filter and the high shelf together.</td></tr>
+    <tr><td class="k">DRIFT</td><td>More wander — drift, motion and beating together.</td></tr>
+    <tr><td class="k">WIDE</td><td>Opens the stereo field: width to maximum and the reverb rotation to full.</td></tr>
+    <tr><td class="k">SAT</td><td>More saturation, up to 95%.</td></tr>
+    <tr><td class="k">LET GO</td><td>Tap for a graceful fade of everything · press past 70% to cut it short in 1.2 s · hold and tap tones to drop just those.</td></tr>
+  </table>
+
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Launchpad X · keys</div>
+  </div>
+
+  <h1>Rows 4, 3 and 1 · selection</h1>
+  <table>
+    <tr><td class="k">Row 4</td><td>The eight timbres, left to right, in the same order as the app. Lit in the timbre's own colour, current one at full brightness.</td></tr>
+    <tr><td class="k">Row 3</td><td>The eight temperaments, in the same order as the app. Cyan.</td></tr>
+    <tr><td class="k">Row 1</td><td>Eight modes — whichever bank is active. Lit in each mode's colour. Sounding tones glide to the new mode rather than jumping.</td></tr>
+  </table>
+
+  <h1 style="margin-top:16pt">Top row and right column</h1>
+  <table>
+    <tr><td class="k">KEY ◀ ▶</td><td>Move the key by a semitone. Held tones glide.</td></tr>
+    <tr><td class="k">OCT ◀ ▶</td><td>Move the whole grid by an octave, 1–6.</td></tr>
+    <tr><td class="k">BANK</td><td>Swap row 1 between mode bank A (diatonic) and B (colour). Dim blue for A, violet for B.</td></tr>
+    <tr><td class="k">TIMB</td><td>Next timbre. Lit in the current timbre's colour.</td></tr>
+    <tr><td class="k">TUNE</td><td>Next temperament.</td></tr>
+    <tr><td class="k">PANIC</td><td>Immediate silence, reverb tail included.</td></tr>
+    <tr><td class="k">Right column</td><td>An eight-step output ladder, lit from the bottom up — green at the bottom, amber at the top, readable in the dark. The bottom pad is a mute: every tone keeps holding behind it.</td></tr>
+    <tr><td class="k">Logo</td><td>Output indicator only. Breathes with the level, in the current mode's colour.</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════════════════════ LAUNCH CONTROL + TROUBLE ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Launch Control · notes</div>
+  </div>
+
+  <h1>Launch Control</h1>
+  <p class="lede">
+    Plug one in and its knobs land on Thrum's parameters in the order the app shows
+    them. Nothing to configure.
+  </p>
+  <table>
+    <tr><td class="k">Both models</td><td>The <strong>Launch Control</strong> (16 knobs) and the <strong>Launch Control XL</strong> (24 knobs + 8 faders) are told apart automatically and get different factory-template CC maps.</td></tr>
+    <tr><td class="k">Soft takeover</td><td>A knob does nothing until it passes through the parameter's current value, so grabbing one never jumps the sound mid-performance.</td></tr>
+    <tr><td class="k">MIDI learn</td><td>Click a parameter's name in the app, then move a knob. The binding is saved and survives relaunching.</td></tr>
+    <tr><td class="k">Pads</td><td>Trigger the five voicings, plus let-go and panic.</td></tr>
+  </table>
+  <p><small>
+    Both devices report themselves as "Launch Control"; only the XL appends "XL", and
+    that is what Thrum keys off. If your device is on a non-factory template, learn
+    the knobs once and it will remember.
+  </small></p>
+
+  <h3>Default knob order</h3>
+  <p class="mono" style="color:var(--soft); font-size:8.2pt; line-height:1.7">
+    Swell · Fade · Beating · Drift · Motion · Sitar Depth · New Tone Level · Swell Ride<br>
+    Brightness · Warmth · Presence Cut · Air · Saturation · Width · Field Drift · Output<br>
+    Decay · Wet · Damping · Size
+  </p>
+  <p><small>A 16-knob Launch Control reaches the first sixteen; the XL reaches all twenty.</small></p>
+
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Troubleshooting</div>
+  </div>
+
+  <h1>If something sounds wrong</h1>
+  <table>
+    <tr><td class="k">Crackle, ticks, dropouts</td><td>Check the <strong>DSP</strong> readout in the top bar. If it shows drops in red, the engine is missing its deadline. Nothing sounding? Then it isn't Thrum. <em>Never run a Debug build</em> — the engine is roughly 40× slower without optimisation and cannot keep up.</td></tr>
+    <tr><td class="k">Sound continues after silencing</td><td>That's the reverb tail, which can run thirty seconds. <strong>PANIC</strong> clears it; Let go and Cut short deliberately don't.</td></tr>
+    <tr><td class="k">Grid is dark or unresponsive</td><td>Check the device pill in the top bar. Unplug and replug — Thrum rescans on any MIDI change and re-enters programmer mode.</td></tr>
+    <tr><td class="k">Launchpad in the wrong mode</td><td>Thrum uses the "LPX MIDI" port, not "LPX DAW". If another app has claimed the device or left it in a different mode, quit that app and replug.</td></tr>
+    <tr><td class="k">Sitar Depth does nothing</td><td>Expected on timbres with no floor. Arm a tone first: ⌥-click, or hold SITAR and tap.</td></tr>
+    <tr><td class="k">A tone won't tap off</td><td>You're pressing too hard or too long and it reads as a level ride. Hold <strong>LET GO</strong> and tap it instead.</td></tr>
+    <tr><td class="k">Everything sounds still</td><td>Beating, Drift or Motion is at zero. Those three are what keep it alive.</td></tr>
+    <tr><td class="k">Tiring after a while</td><td>Raise <strong>Presence Cut</strong>. Energy around 2–5 kHz is what wears the ear out over twenty minutes.</td></tr>
+  </table>
+
+  <div class="callout" style="margin-top:16pt">
+    <strong>A drone wants patience.</strong> Most of what Thrum does happens on cycles of forty
+    seconds to a minute and a half. If you audition it for ten seconds at a time you
+    will hear a pad; give it five minutes and you will hear the instrument.
+  </div>
+</section>
+
+</body>
+</html>

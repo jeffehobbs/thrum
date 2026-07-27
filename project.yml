@@ -1,0 +1,37 @@
+name: Thrum
+options:
+  bundleIdPrefix: com.jeffhobbs
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: YKF353373Y
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+targets:
+  Thrum:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Shared
+      - path: Assets.xcassets
+        optional: true
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Thrum
+        CFBundleIconFile: AppIcon
+        LSApplicationCategoryType: public.app-category.music
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: "Jeff Hobbs"
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrum
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
