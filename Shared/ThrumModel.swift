@@ -115,6 +115,11 @@ public final class ThrumModel: ObservableObject {
     /// Last preset applied, so the Launchpad can light it.
     @Published public var pulsePreset: Int? = nil
 
+    // MARK: Flow
+
+    /// The instrument playing itself. Lazily made because it needs `self`.
+    public lazy var flow: FlowDirector = FlowDirector(model: self)
+
     // MARK: Spatial
 
     /// AirPods head orientation. Owned here so the UI and the audio host see
@@ -878,11 +883,14 @@ public final class ThrumModel: ObservableObject {
         show("All lanes off")
     }
 
-    public func applyPulsePreset(_ i: Int) {
+    /// `adoptTempo: false` leaves the clock where it is and changes only the
+    /// lanes — Flow uses that, because a preset's tempo arriving as a jump is the
+    /// one thing in a preset that can't be slid into.
+    public func applyPulsePreset(_ i: Int, adoptTempo: Bool = true) {
         guard i >= 0, i < PulsePreset.all.count else { return }
         let p = PulsePreset.all[i]
         lanes = p.lanes
-        set(.tempo, p.bpm)
+        if adoptTempo { set(.tempo, p.bpm) }
         pulsePreset = i
         show("\(p.name) — \(p.detail)")
     }

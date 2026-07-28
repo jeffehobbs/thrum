@@ -91,6 +91,12 @@ public final class DroneEngine {
     /// When set, `renderSpatial` fills the sixteen mono buses and the wet
     /// stereo bed instead of a single stereo mix. Read once per block.
     public var spatialEnabled = false
+    /// How long a sounding voice takes to slide to a new pitch when the key, mode
+    /// or temperament changes. Half a second is right for a change you made
+    /// yourself — you want to hear that it happened. Flow winds it right out,
+    /// because a fifth arriving in half a second is a lurch when nobody asked for
+    /// it, and the same interval over seven seconds is a modulation.
+    public var glideSeconds: Double = 0.55
 
     // MARK: - Metering (render thread writes, UI reads; benign race on Floats)
 
@@ -535,7 +541,7 @@ public final class DroneEngine {
 
         let swellTau = max(0.05, swellSeconds * tbSwell[ti] / 3.0)
         let attackCoef = 1.0 - Float(exp(-1.0 / (swellTau * sr)))
-        let glideCoef = 1.0 - Float(exp(-1.0 / (0.55 * sr)))
+        let glideCoef = 1.0 - Float(exp(-1.0 / (max(0.05, glideSeconds) * sr)))
 
         // Accent envelope. The attack aims a little past its target so it
         // actually gets there in the time asked for; the decay is a −60 dB

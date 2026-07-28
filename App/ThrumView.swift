@@ -91,6 +91,8 @@ struct ThrumView: View {
 
             Spacer()
 
+            FlowButton(model: model)
+
             RenderLoad(model: model)
             OutputMeter(model: model)
 
@@ -663,6 +665,44 @@ private struct BeatDots: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Flow
+
+/// The yin-yang. One button that hands the instrument to itself.
+///
+/// It turns slowly while Flow is running — one revolution a minute, which is
+/// about the rate the music moves at, and slow enough to sit in peripheral vision
+/// for an hour without nagging.
+private struct FlowButton: View {
+    @ObservedObject var model: ThrumModel
+    @ObservedObject var flow: FlowDirector
+
+    init(model: ThrumModel) {
+        self.model = model
+        self.flow = model.flow
+    }
+
+    var body: some View {
+        Button { model.flow.toggle() } label: {
+            TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !flow.isRunning)) { _ in
+                Text("\u{262F}")
+                    .font(.system(size: 19))
+                    .foregroundStyle(flow.isRunning
+                                     ? Ink.mode(model.harmony.mode.hue, 1.0, 0.55)
+                                     : Ink.text.opacity(0.55))
+                    .rotationEffect(.degrees(flow.isRunning ? flow.elapsed * 6 : 0))
+                    .shadow(color: flow.isRunning
+                            ? Ink.mode(model.harmony.mode.hue).opacity(0.7) : .clear,
+                            radius: 7)
+                    .frame(width: 30, height: 26)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(flow.isRunning
+              ? "Flow is running — voicings, modes, timbres and arpeggios are drifting on their own. Click to take back over; everything stays where it got to."
+              : "Flow: hand the instrument to itself. Something is always moving and nothing ever jumps, so you can work through it. Different every time.")
     }
 }
 

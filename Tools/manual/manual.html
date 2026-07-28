@@ -163,7 +163,7 @@
   </div>
   <div class="cover-foot">
     <span>Instructions — every control, every key</span>
-    <span>Jeff Hobbs · v1.2</span>
+    <span>Jeff Hobbs · v1.3</span>
   </div>
 </section>
 
@@ -204,7 +204,8 @@
     <tr><td class="v">3</td><td>Let it settle for half a minute. It should never sound quite the same twice.</td></tr>
     <tr><td class="v">4</td><td>Add or remove tones from the grid. ⌥-click one to give it a sitar buzz.</td></tr>
     <tr><td class="v">5</td><td>Under Pulse, press <strong>Run</strong>. The chord you are holding starts to arpeggiate through itself, two lanes at different rates. <strong>TAP</strong> four times to set the tempo by hand.</td></tr>
-    <tr><td class="v">6</td><td>When you're done, <span class="kbd">⌘.</span> lets everything go gracefully.</td></tr>
+    <tr><td class="v">6</td><td>Or skip all of that: press the <strong>☯</strong> in the top bar and Thrum plays itself. Different every time.</td></tr>
+    <tr><td class="v">7</td><td>When you're done, <span class="kbd">⌘.</span> lets everything go gracefully.</td></tr>
   </table>
 
   <h3>Why it doesn't get boring</h3>
@@ -248,6 +249,7 @@
   <h1>Top bar</h1>
   <table>
     <tr><td class="k">Chord readout</td><td>The current key and chord, e.g. <strong>Dm7</strong>, coloured by mode. Underneath: the mode name, the temperament, and the reference pitch.</td></tr>
+    <tr><td class="k">☯ Flow</td><td>Hands the instrument to itself — see <em>Flow</em>. Turns slowly while it is running, in the current mode's colour.</td></tr>
     <tr><td class="k">DSP</td><td>Share of the audio deadline the engine is using, as a decaying peak. Under 10% is normal. If it shows <strong>drops</strong> in red, blocks are being missed and you will hear crackle. Click to reset the tally.</td></tr>
     <tr><td class="k">Output meter</td><td>Eighteen segments, peak-reading. The top three turn red.</td></tr>
     <tr><td class="k">Device pills</td><td>Green dot when a Launchpad X or Launch Control is connected. Hot-plugging either is fine.</td></tr>
@@ -658,6 +660,74 @@
   </table>
 </section>
 
+
+
+<!-- ═══════════════════════════ FLOW ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Flow</div>
+  </div>
+
+  <h1>Flow · the ☯ button</h1>
+  <p class="lede">
+    Press it and Thrum takes itself somewhere. It is meant to be worked through —
+    put it on and go read something.
+  </p>
+
+  <p>
+    Modes turn over, voicings rebuild, timbres change, arpeggios arrive and leave,
+    jawari appears on a tone and later disappears, and two dozen controls are
+    sliding at any given moment. <span class="kbd">⌥⌘F</span> does the same as the
+    button. It is a <strong>different journey every time</strong> — the generator is reseeded
+    on every start, not just when the app launches.
+  </p>
+
+  <h3>Why it does not jar</h3>
+  <p>
+    <strong>Nothing is set, only ramped.</strong> Every change is a slide of twenty to ninety
+    seconds on a curve with zero velocity <em>and</em> zero acceleration at both ends, so
+    it has no edge to notice at either side. The shortest slide Flow will open is
+    nine seconds; quicker than that reads as an event rather than a drift.
+  </p>
+  <p>
+    <strong>The jumps are hidden under a breath.</strong> Swapping a timbre recomputes every
+    partial, and moving the key sweeps every sounding pitch — at full level, both
+    lurch. So Flow leans on <em>Swell Ride</em> first, makes the change with the drone
+    down at a fifth of its level, and brings it back over fourteen seconds. Key
+    moves also glide over seven and a half seconds rather than the half-second a
+    change you made yourself gets, which turns a fifth into a modulation.
+  </p>
+
+  <h3>Nothing lines up</h3>
+  <table>
+    <tr><th style="width:26%">Gesture</th><th style="width:16%">Every</th><th></th></tr>
+    <tr><td class="k">Controls drift</td><td class="v">10–20 s</td><td>Two to four sliders start new slides, so several always overlap and none is the event.</td></tr>
+    <tr><td class="k">Arpeggios shift</td><td class="v">1–3 min</td><td>A lane changes rate, pattern, source or register — or the pulse arrives out of silence, or thins and leaves.</td></tr>
+    <tr><td class="k">Voicing rebuilds</td><td class="v">2–4½ min</td><td>Already a crossfade: the old stack fades at <em>Fade</em> as the new one swells at <em>Swell</em>.</td></tr>
+    <tr><td class="k">Jawari moves</td><td class="v">2–5 min</td><td>A sitar buzz armed on a sounding tone, or taken off one.</td></tr>
+    <tr><td class="k">Mode turns over</td><td class="v">2½–5½ min</td><td>Restful modes only — Locrian, Altered, Diminished and Whole Tone are good to play <em>over</em> and wearing to sit <em>inside</em>.</td></tr>
+    <tr><td class="k">Timbre changes</td><td class="v">3½–8 min</td><td>Under a breath.</td></tr>
+    <tr><td class="k">Key moves</td><td class="v">5–10 min</td><td>By a fourth or a fifth — the moves sharing most notes with where you were. Sometimes a register instead.</td></tr>
+    <tr><td class="k">Temperament</td><td class="v">7–15 min</td><td>Rare, and it glides.</td></tr>
+  </table>
+  <p><small>Each runs on its own clock at its own tempo, so the arrangement never falls into a pattern — the engine's prime-numbered modulation, one level up.</small></p>
+
+  <div class="callout">
+    <strong>Two things Flow will not do.</strong> It never touches <strong>Output</strong> — the volume is
+    yours. And <strong>Presence Cut</strong> has a floor, because energy around 3 kHz is what
+    makes a long drone tiring and this is the one mode that runs for hours
+    unattended. Everything else roams inside a range chosen to stay pleasant for an
+    hour rather than to show what is possible.
+  </div>
+
+  <p><small>
+    Turning Flow off leaves everything where it drifted to — no snap back, because
+    where it got to is usually better than where you started. Anything you touch
+    while it runs, it will drift away from again in its own time.
+  </small></p>
+</section>
 
 <!-- ═══════════════════════════ APP: SPATIAL ═══════════════════════════ -->
 <section class="page">
@@ -1083,6 +1153,7 @@
     <tr><td class="k">Spatial sounds like ordinary stereo</td><td>Almost always macOS's own Spatial Audio also being on for the AirPods — set it to Off. Failing that, <strong>Wet</strong> is high enough that the un-spatialized reverb bed is drowning the field; bring it down.</td></tr>
     <tr><td class="k">The field turns the wrong way</td><td>Hit <strong>Recenter</strong> facing forward. If a tone still <em>follows</em> your head instead of staying put, that is a genuine bug rather than a setting — the sign convention is measured in <code>Tools/axis</code>.</td></tr>
     <tr><td class="k">Head tracking never starts</td><td>Only AirPods Pro and AirPods Max report orientation. If it was denied, Thrum appears under Privacy &amp; Security → Motion &amp; Fitness.</td></tr>
+    <tr><td class="k">Flow changed something I liked</td><td>Turn it off — the ☯ or <span class="kbd">⌥⌘F</span> — and everything stays exactly where it had drifted to. Nothing snaps back.</td></tr>
     <tr><td class="k">Everything sounds still</td><td>Beating, Drift or Motion is at zero. Those three are what keep it alive.</td></tr>
     <tr><td class="k">Tiring after a while</td><td>Raise <strong>Presence Cut</strong>. Energy around 2–5 kHz is what wears the ear out over twenty minutes.</td></tr>
   </table>

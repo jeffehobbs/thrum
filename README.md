@@ -13,11 +13,13 @@ chord you are already holding, at four different rates at once — and a
 **spatial** mode that places every tone around your head and keeps it there when
 you turn, on AirPods Pro or AirPods Max.
 
+Or press the **☯** and let the instrument play itself.
+
 `instructions.pdf` is the manual.
 
 ## Install
 
-Grab `Thrum-1.2.zip` from the [latest
+Grab `Thrum-1.3.zip` from the [latest
 release](https://github.com/jeffehobbs/thrum/releases/latest), unzip it and drag
 `Thrum.app` to `/Applications`. It's signed and notarized, so it opens without
 any Gatekeeper detour. macOS 14+, Apple silicon or Intel.
@@ -349,6 +351,40 @@ the chord mid-figure and the lane keeps its place in the bar.
 
 ---
 
+## Flow
+
+Press the **☯** in the top bar (or `⌥⌘F`) and Thrum takes itself somewhere. Modes
+turn over, voicings rebuild, timbres change, arpeggios arrive and leave, and two
+dozen controls are sliding at any moment. It is meant to be worked through — put
+it on and go read something.
+
+The whole design is in the transitions, not the destinations. Two rules:
+
+- **Nothing is ever set, only ramped.** Every change is a slide of twenty to
+  ninety seconds on a smootherstep curve — zero velocity *and* zero acceleration
+  at both ends — so a change has no edge to notice at either side. The shortest
+  slide Flow will open is nine seconds.
+- **The one discontinuous thing is hidden under a breath.** Swapping a timbre
+  recomputes every partial of every voice, which at full level is a lurch. So Flow
+  leans on Swell Ride first, changes the reeds while the drone is down, and brings
+  it back up over fourteen seconds. It reads as the room inhaling.
+
+Every gesture runs on its own clock at its own tempo, so nothing lines up:
+parameters drift every ten seconds or so, voicings turn over every two to four
+minutes, the key moves maybe twice an hour. That is the same idea as the engine's
+prime-numbered modulation, one level up.
+
+**It is a different journey every time** — the generator is reseeded on every
+start, not just at launch.
+
+Two things Flow will not do. It never touches **Output**, because the volume is
+yours. And **Presence Cut** has a floor of 0.45, because energy around 3 kHz is
+what makes a long drone tiring and Flow is the one mode that runs for hours
+unattended. Turning Flow off leaves everything exactly where it drifted to, which
+is often a better patch than the one you started from.
+
+---
+
 ## Spatial — the drone around you
 
 Sixteen mono buses placed around your head and rendered binaurally, instead of
@@ -469,6 +505,22 @@ swiftc -O -o /tmp/thrumspatial \
 /tmp/thrumspatial
 ```
 
+`Tools/flow/` drives Flow through hours of compressed time and checks the things
+it promises: that no control ever moves more than a few percent of its travel in
+one tick, that something is moving on essentially every tick, that nothing leaves
+its range, that Output is untouched and Presence Cut holds its floor, that
+Beating/Drift/Motion never go dead, and that two runs end up somewhere different.
+
+```sh
+swiftc -O -o /tmp/thrumflow \
+  Shared/{Tuning,Harmony,Timbre,Events,Cathedral,DroneEngine,Pulse,Spatial,ThrumModel,Flow}.swift \
+  Tools/flow/main.swift
+/tmp/thrumflow
+```
+
+It earned its keep immediately: it caught the preset tempo arriving as a 23% jump
+and a two-second fade that was quicker than the mode's own floor.
+
 `Tools/axis/` measures `AVAudioEnvironmentNode`'s sign conventions by asking which
 ear a single source lands in. Do not derive these by hand: positive listener yaw
 turns the listener *clockwise*, the opposite handedness from CoreMotion, and
@@ -499,7 +551,7 @@ the manual's page breaks get checked.
 
 ## The manual
 
-`instructions.pdf` — 21 pages covering every control in the app and every key on
+`instructions.pdf` — 22 pages covering every control in the app and every key on
 the Launchpad, plus the pulse, the spatial field, all fifteen voicings, the jawari
 explained in detail and a troubleshooting page. Rebuild it after changing any control:
 
@@ -529,6 +581,7 @@ Shared/   Tuning       temperaments and pitch-class tables
           Cathedral    the FDN reverb
           Pulse        tempo, tap tempo, the four arpeggiator lanes
           Spatial      the ring geometry, and AirPods head tracking
+          Flow         the director that plays the instrument itself
           ThrumModel   instrument state; the only writer to the engine
 App/      ThrumApp     AVAudioEngine host
           ThrumView    the interface

@@ -323,6 +323,10 @@ struct ThrumCommands: Commands {
             Divider()
             Button("All Lanes Off") { model.allLanesOff() }
         }
+        CommandMenu("Flow") {
+            Button(model.flow.isRunning ? "Stop Flow" : "Start Flow") { model.flow.toggle() }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+        }
         CommandMenu("Field") {
             Button(model.spatialEnabled ? "Back to Stereo" : "Spatial Field") {
                 model.spatialEnabled.toggle()
