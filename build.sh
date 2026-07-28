@@ -57,13 +57,28 @@ xcodegen generate --quiet
 # Sign ad-hoc during the build; the notarize path re-signs with the real
 # identity afterwards. This keeps xcodebuild from needing a provisioning
 # profile for an app that is distributed outside the App Store.
+# ARCHS/ONLY_ACTIVE_ARCH are explicit because they have to be: xcodebuild
+# defaults to ONLY_ACTIVE_ARCH=YES for a local build, which quietly produces a
+# host-only binary. Thrum shipped arm64-only from 1.0 to 1.3.1 while the README
+# claimed Apple silicon *or* Intel, and nothing in the pipeline noticed — hence
+# the lipo check further down.
 xcodebuild -project Thrum.xcodeproj -scheme Thrum -configuration "$CONFIG" \
   -derivedDataPath build -quiet \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" \
   build
 
 APP="build/Build/Products/$CONFIG/Thrum.app"
-echo "Built: $APP  ($CONFIG)"
+
+# Universal or it doesn't ship. This is a one-line guard against the exact way
+# the claim and the artifact drifted apart before.
+ARCHS_BUILT=$(lipo -archs "$APP/Contents/MacOS/Thrum" | tr ' ' '\n' | sort | tr '\n' ' ')
+if [[ "$ARCHS_BUILT" != "arm64 x86_64 " ]]; then
+  echo "✗ expected a universal binary, got: $ARCHS_BUILT" >&2
+  exit 1
+fi
+
+echo "Built: $APP  ($CONFIG, universal: $ARCHS_BUILT)"
 [[ "$CONFIG" == "Debug" ]] && echo "  ⚠︎  Debug build — the engine will glitch. Use ./build.sh for Release."
 
 if [[ "$MODE" == "run" ]]; then
