@@ -5,9 +5,6 @@ that harmony maps onto a Novation Launchpad X, and you build a drone out of it
 by hand — tones swell in over seconds, hold indefinitely, and ride up and down
 under your fingers. Any tone can be given a jawari buzz for a sitar edge.
 
-The point is to make something a horn player or a guitarist can improvise over
-for twenty minutes without it going anywhere or getting tiring.
-
 There is also a **pulse** — a tapped tempo and four arpeggiators that work the
 chord you are already holding, at four different rates at once — and a
 **spatial** mode that places every tone around your head and keeps it there when
