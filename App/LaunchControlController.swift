@@ -40,6 +40,7 @@ final class LaunchControlController: ObservableObject {
         .swell, .fade, .beating, .drift, .motion, .sitarDepth, .padLevel, .globalSwell,
         .brightness, .warmth, .presence, .air, .drive, .width, .spatialDrift, .masterVolume,
         .reverbDecay, .reverbMix, .reverbDamp, .reverbSize,
+        .tempo, .pluckAttack, .pluckDecay, .arpLevel, .swing, .humanize,
     ]
 
     init(model: ThrumModel) {
@@ -160,14 +161,15 @@ final class LaunchControlController: ObservableObject {
     private func pad(note: Int) {
         let voicings = ThrumModel.Voicing.allCases
         // Factory template pads are contiguous per row; fold whatever arrives
-        // into the voicing list plus the two panic actions.
+        // into the first six voicings plus the two ways out. Capped at six on
+        // purpose — there are fifteen voicings now, and letting them fill all
+        // eight pads would cost the panic button, which has to stay reachable.
         let slot = note % 8
-        if slot < voicings.count {
-            model.apply(voicings[slot])
-        } else if slot == 6 {
-            model.fadeAll()
-        } else {
-            model.panic()
+        switch slot {
+        case 6: model.fadeAll()
+        case 7: model.panic()
+        default:
+            if slot < voicings.count { model.apply(voicings[slot]) }
         }
     }
 

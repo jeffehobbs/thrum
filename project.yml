@@ -21,6 +21,12 @@ targets:
     info:
       path: App/Info.plist
       properties:
+        # XcodeGen rewrites App/Info.plist on every generate and its own default
+        # for these two is a hardcoded 1.0 / 1 — editing the plist by hand or
+        # bumping MARKETING_VERSION alone silently ships the old number. Point
+        # them at the build settings so there is one source of truth below.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Thrum
         CFBundleIconFile: AppIcon
         LSApplicationCategoryType: public.app-category.music
@@ -33,5 +39,5 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrum
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "2"

@@ -75,6 +75,13 @@ public final class DroneEngine {
     public var spatialDrift: Float = 0.5
     /// 0…1 master swell, rides everything that is sounding at once.
     public var globalSwell: Float = 1.0
+    /// Rise time of an arpeggiated accent, in seconds. Kept soft by default —
+    /// this is still a drone, and a hard edge on a stack of pure partials
+    /// clicks.
+    public var pluckAttack: Double = 0.035
+    /// Time for an accent to fall away to silence, in seconds. Long enough to
+    /// overlap the next one is where it stops sounding like a sequencer.
+    public var pluckDecay: Double = 1.4
 
     // MARK: - Metering (render thread writes, UI reads; benign race on Floats)
 
@@ -107,6 +114,16 @@ public final class DroneEngine {
         var targetFreq = 0.0
         var sitar: Float = 0
         var sitarSm: Float = 0
+        /// The arpeggiator's accent envelope. Entirely separate from `env`:
+        /// it is *added* to whatever the drone is already holding, so a
+        /// plucked tone that is also being held swells out of the drone and
+        /// falls back into it rather than replacing it.
+        var pluck: Float = 0
+        var pluckPeak: Float = 0
+        var pluckRising = false
+        /// Combined gain with a slow release, so a 20 Hz repaint still catches
+        /// the flash of a fast arpeggio on the pads and the LEDs.
+        var meter: Float = 0
         var partialCount: Int32 = 0
         var lpL1: Float = 0, lpL2: Float = 0
         var lpR1: Float = 0, lpR2: Float = 0
@@ -314,6 +331,12 @@ public final class DroneEngine {
         events.push(DroneEvent(.retune, pad: pad, value: frequency))
     }
 
+    /// Strike an accent on a voice. Safe to call from the pulse queue — the
+    /// event queue is the only thing it touches.
+    public func pluck(pad: Int, velocity: Double) {
+        events.push(DroneEvent(.pluck, pad: pad, value: velocity))
+    }
+
     /// Lets everything go. `seconds` overrides the fade time for this gesture.
     public func fadeAll(seconds: Double? = nil) {
         events.push(DroneEvent(.fadeAll, value: (seconds ?? fadeSeconds) / max(0.1, fadeSeconds)))
@@ -360,7 +383,16 @@ public final class DroneEngine {
         case .retune:
             guard p >= 0, p < Self.voiceCount, e.value > 8, e.value < 20_000 else { return }
             voices[p].targetFreq = e.value
-            if !voices[p].active || voices[p].env < 1e-5 { voices[p].freq = e.value }
+            // Silent voices jump; anything audible — held *or* still ringing
+            // from an accent — glides.
+            if !voices[p].active || (voices[p].env < 1e-5 && voices[p].pluck < 1e-5) {
+                voices[p].freq = e.value
+            }
+        case .pluck:
+            guard p >= 0, p < Self.voiceCount else { return }
+            voices[p].pluckPeak = Float(min(max(e.value, 0), 1))
+            voices[p].pluckRising = true
+            voices[p].active = true
         case .fadeAll:
             let scale = Float(min(max(e.value, 0.02), 4))
             for i in 0..<Self.voiceCount {
@@ -373,6 +405,10 @@ public final class DroneEngine {
                 voices[i].gate = false
                 voices[i].env = 0
                 voices[i].level = 0
+                voices[i].pluck = 0
+                voices[i].pluckPeak = 0
+                voices[i].pluckRising = false
+                voices[i].meter = 0
             }
             combBuf.update(repeating: 0, count: Self.voiceCount * Self.combSize)
             apState.update(repeating: 0, count: Self.voiceCount * 16)
@@ -452,6 +488,12 @@ public final class DroneEngine {
         let swellTau = max(0.05, swellSeconds * tbSwell[ti] / 3.0)
         let attackCoef = 1.0 - Float(exp(-1.0 / (swellTau * sr)))
         let glideCoef = 1.0 - Float(exp(-1.0 / (0.55 * sr)))
+
+        // Accent envelope. The attack aims a little past its target so it
+        // actually gets there in the time asked for; the decay is a −60 dB
+        // time, which is what "how long does that note last" means to an ear.
+        let pluckAtkCoef = 1.0 - Float(exp(-2.2 / (max(0.001, pluckAttack) * sr)))
+        let pluckDecCoef = 1.0 - Float(exp(-6.9 / (max(0.02, pluckDecay) * sr)))
 
         let beatBase = Double(min(max(beating, 0), 1)) * 1.10 * tbBeat[ti]
         let driftCentsMax = Double(min(max(drift, 0), 1)) * 9.0
@@ -541,6 +583,16 @@ public final class DroneEngine {
                     let coef = target > vc.env ? attackCoef : releaseCoef
                     vc.env += (target - vc.env) * coef
 
+                    if vc.pluckRising {
+                        vc.pluck += (vc.pluckPeak * 1.25 - vc.pluck) * pluckAtkCoef
+                        if vc.pluck >= vc.pluckPeak {
+                            vc.pluck = vc.pluckPeak
+                            vc.pluckRising = false
+                        }
+                    } else if vc.pluck > 1e-6 {
+                        vc.pluck -= vc.pluck * pluckDecCoef
+                    }
+
                     var sL: Float = 0
                     var sR: Float = 0
                     for p in 0..<np {
@@ -608,16 +660,28 @@ public final class DroneEngine {
                         oR += buzz
                     }
 
-                    chL[idx] += oL * vc.env
-                    chR[idx] += oR * vc.env
+                    // The accent rides *on top of* the drone rather than
+                    // replacing it, and gets out of the way as the held level
+                    // rises so a loud tone doesn't get an absurd spike.
+                    let g = vc.env + vc.pluck * (1.0 - 0.6 * vc.env)
+                    chL[idx] += oL * g
+                    chR[idx] += oR * g
                 }
+
+                // Peak-with-slow-release, updated once a control chunk. Falls
+                // from full to nothing in about 65 ms, so a fast arpeggio still
+                // reads on a 20 Hz repaint instead of strobing.
+                vc.meter = max(min(1, vc.env + vc.pluck), vc.meter - 0.015)
+                meters[v] = vc.meter
                 i += count
             }
 
-            meters[v] = vc.env
-            if !vc.gate && vc.env < 2e-5 {
+            if !vc.gate && vc.env < 2e-5 && vc.pluck < 2e-5 && !vc.pluckRising {
                 vc.active = false
                 vc.env = 0
+                vc.pluck = 0
+                vc.meter = 0
+                meters[v] = 0
                 vc.lpL1 = 0; vc.lpL2 = 0; vc.lpR1 = 0; vc.lpR2 = 0
                 vc.combLP = 0; vc.jawariHP = 0
             }

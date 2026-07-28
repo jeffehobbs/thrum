@@ -10,6 +10,7 @@ public struct DroneEvent {
         case retune       // value: new frequency in Hz, glided into
         case fadeAll      // value: release scale (1 = normal, small = quick)
         case panic        // immediate silence, FX tails cleared
+        case pluck        // value: 0…1 accent struck on top of whatever this voice is holding
     }
 
     public var kind: Int32

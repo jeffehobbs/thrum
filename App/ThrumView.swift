@@ -179,12 +179,18 @@ struct ThrumView: View {
                         .padding(.top, 2)
                 }
             }
+            .padding(.bottom, Self.scrollTail)
         }
     }
 
     // MARK: Center
 
+    /// Room under the last panel in every scrolling column. Without it the
+    /// bottom of a column sits behind the Dock and can't be scrolled clear of it.
+    static let scrollTail: CGFloat = 96
+
     private var centerColumn: some View {
+        ScrollView(.vertical, showsIndicators: false) {
         VStack(spacing: 12) {
             Panel(title: "Timbre") {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
@@ -207,15 +213,21 @@ struct ThrumView: View {
 
             ToneGrid(model: model)
 
+            PulsePanel(model: model)
+
             Panel(title: "Voicings") {
-                HStack(spacing: 6) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
                     ForEach(ThrumModel.Voicing.allCases) { v in
                         Button { model.apply(v) } label: {
                             Text(v.rawValue)
-                                .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                                .frame(maxWidth: .infinity, minHeight: 28)
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.85)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity, minHeight: 30)
                         }
                         .buttonStyle(Chip(active: false))
+                        .help(v.detail)
                     }
                 }
                 HStack(spacing: 8) {
@@ -233,6 +245,8 @@ struct ThrumView: View {
                     .buttonStyle(Chip(active: false, hue: 0.0))
                 }
             }
+        }
+        .padding(.bottom, Self.scrollTail)
         }
     }
 
@@ -276,6 +290,7 @@ struct ThrumView: View {
                     }
                 }
             }
+            .padding(.bottom, Self.scrollTail)
         }
     }
 
@@ -449,6 +464,206 @@ private struct LevelBar: View {
     }
 }
 
+// MARK: - Pulse
+
+/// Four arpeggiators over the drone, and the clock they divide.
+private struct PulsePanel: View {
+    @ObservedObject var model: ThrumModel
+
+    var body: some View {
+        Panel(title: "Pulse — arpeggios over the drone") {
+            HStack(spacing: 8) {
+                Button { model.tapTempo() } label: {
+                    Text("TAP")
+                        .font(.system(size: 11, weight: .heavy, design: .rounded))
+                        .tracking(1.4)
+                        .frame(width: 52, height: 30)
+                }
+                .buttonStyle(Chip(active: false))
+                .help("Tap four times in time with the room. The last tap is the downbeat.")
+
+                Text(String(format: "%.0f", model.tempo))
+                    .font(.system(size: 21, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Ink.amber)
+                    .frame(minWidth: 42, alignment: .trailing)
+                Text("bpm")
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .foregroundStyle(Ink.faint)
+
+                Stepper2(label: "Tempo", value: "",
+                         down: { model.nudgeTempo(-1) }, up: { model.nudgeTempo(1) })
+
+                BeatDots(model: model)
+
+                Spacer(minLength: 4)
+
+                Menu {
+                    ForEach(PulsePreset.all) { p in
+                        Button("\(p.name) — \(p.detail)") { model.applyPulsePreset(p.id) }
+                    }
+                    Divider()
+                    Button("All lanes off") { model.allLanesOff() }
+                    Button("Realign lanes") { model.realignPulse() }
+                } label: {
+                    Text(model.pulsePreset.map { PulsePreset.all[$0].name } ?? "Presets")
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .lineLimit(1)
+                        .frame(width: 84, height: 26)
+                        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Ink.panelEdge))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+
+                Button { model.togglePulse() } label: {
+                    Label(model.pulseRunning ? "Stop" : "Run",
+                          systemImage: model.pulseRunning ? "stop.fill" : "play.fill")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .frame(width: 72, height: 30)
+                }
+                .buttonStyle(Chip(active: model.pulseRunning, hue: 0.36))
+            }
+
+            ForEach(0..<PulseCore.laneCount, id: \.self) { i in
+                LaneStrip(model: model, index: i, hue: PulseCore.laneHues[i])
+            }
+
+            Text("Every lane draws from the mode and chord already loaded. Rates are ratios, not note values — ×1 against ×1½ takes six beats to come back around, and that drift is the point.")
+                .font(.system(size: 9.5, design: .rounded))
+                .foregroundStyle(Ink.faint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct LaneStrip: View {
+    @ObservedObject var model: ThrumModel
+    let index: Int
+    let hue: Double
+
+    var body: some View {
+        let lane = model.lanes[index]
+        HStack(spacing: 5) {
+            Button { model.toggleLane(index) } label: {
+                HStack(spacing: 4) {
+                    LaneDot(model: model, index: index, hue: hue)
+                    Text("\(index + 1)")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                }
+                .frame(width: 34, height: 24)
+            }
+            .buttonStyle(Chip(active: lane.enabled, hue: hue))
+            .help(model.describe(lane: index))
+
+            MenuChip(title: lane.source.rawValue, width: 58, enabled: lane.enabled) {
+                ForEach(ArpSource.allCases) { s in
+                    Button("\(s.rawValue) — \(s.detail)") { model.setLaneSource(index, s) }
+                }
+            }
+            MenuChip(title: lane.pattern.rawValue, width: 74, enabled: lane.enabled) {
+                ForEach(ArpPattern.allCases) { p in
+                    Button("\(p.rawValue) — \(p.detail)") { model.setLanePattern(index, p) }
+                }
+            }
+            MenuChip(title: lane.division.name, width: 44, enabled: lane.enabled) {
+                ForEach(Division.all) { d in
+                    Button("\(d.name) — \(d.detail)") { model.setLaneDivision(index, d.id) }
+                }
+            }
+            MenuChip(title: lane.span.name, width: 44, enabled: lane.enabled) {
+                ForEach(RowSpan.all) { s in
+                    Button("Octave \(s.name)") { model.setLaneSpan(index, s.id) }
+                }
+            }
+            Button { model.nudgeLanePhase(index) } label: {
+                Text(lane.phase == 0 ? "—" : "\(Int(lane.phase * 4))/4")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .frame(width: 28, height: 24)
+            }
+            .buttonStyle(Chip(active: lane.phase != 0, hue: hue))
+            .help("Shove this lane a quarter beat later, so it chases the others instead of locking to them.")
+
+            NormalizedSlider(
+                position: Binding(get: { model.lanes[index].level },
+                                  set: { model.setLaneLevel(index, $0) }),
+                hue: hue)
+                .opacity(lane.enabled ? 1 : 0.35)
+        }
+    }
+}
+
+/// A menu styled to match the chips around it.
+private struct MenuChip<Content: View>: View {
+    let title: String
+    let width: CGFloat
+    var enabled = true
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        // The frame and the chip go *outside* the Menu. A borderless Menu lays
+        // its label out to the label's own text, so sizing it from in there
+        // makes every chip a different width depending on what is selected —
+        // and that walks the lane sliders out of alignment with each other.
+        Menu {
+            content
+        } label: {
+            Text(title)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(enabled ? Ink.text.opacity(0.85) : Ink.faint)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: width, height: 24)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Ink.panelEdge))
+    }
+}
+
+/// Lights when its lane strikes a note. Reads the pulse queue's benign-race
+/// timestamps rather than pushing a published change per step — the clock runs
+/// at up to eight notes a second and SwiftUI does not need to hear about it.
+private struct LaneDot: View {
+    @ObservedObject var model: ThrumModel
+    let index: Int
+    let hue: Double
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !model.pulseRunning)) { _ in
+            let age = PulseCore.now() - model.pulse.laneFlash[index]
+            let glow = model.lanes[index].enabled ? max(0, 1 - age / 0.3) : 0
+            Circle()
+                .fill(Color(hue: hue, saturation: 0.65, brightness: 1))
+                .opacity(0.16 + 0.84 * glow)
+                .frame(width: 7, height: 7)
+        }
+    }
+}
+
+private struct BeatDots: View {
+    @ObservedObject var model: ThrumModel
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !model.pulseRunning)) { _ in
+            let beat = model.pulse.displayBeat
+            let inBar = beat - floor(beat / 4) * 4
+            let lit = min(3, max(0, Int(inBar)))
+            let frac = inBar - floor(inBar)
+            HStack(spacing: 4) {
+                ForEach(0..<4, id: \.self) { i in
+                    Circle()
+                        .fill(i == 0 ? Ink.amber : Ink.text)
+                        .opacity(model.pulseRunning && i == lit ? 1.0 - 0.72 * frac : 0.14)
+                        .frame(width: 6, height: 6)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Parameter slider
 
 private struct ParamSlider: View {
@@ -487,14 +702,22 @@ private struct ParamSlider: View {
                     get: { spec.normalized(model.value(spec.param)) },
                     set: { model.set(spec.param, spec.value(fromNormalized: $0)) }),
                 hue: 0.09)
-            if hovering {
-                Text(spec.detail)
-                    .font(.system(size: 9, design: .rounded))
-                    .foregroundStyle(Ink.faint)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // Two lines of room are held open whether or not the text is
+            // showing. Adding and removing the label instead reflows every
+            // slider below it, so the one you were reaching for moves while
+            // you reach for it.
+            Text(spec.detail)
+                .font(.system(size: 9, design: .rounded))
+                .foregroundStyle(Ink.faint)
+                .lineLimit(2, reservesSpace: true)
+                .multilineTextAlignment(.leading)
+                .opacity(hovering ? 1 : 0)
+                .animation(.easeInOut(duration: 0.18), value: hovering)
         }
         .padding(.vertical, 1)
+        // The reserved text counts as part of the target, so the label stays up
+        // while you read it rather than flickering off at the slider's edge.
+        .contentShape(Rectangle())
         .onHover { hovering = $0 }
     }
 }

@@ -43,6 +43,7 @@ final class ThrumHost: ObservableObject {
 
     func shutdown() {
         launchpad.shutdown()
+        model.pulse.stop()
         audio.stop()
     }
 }
@@ -76,6 +77,22 @@ struct ThrumApp: App {
                     .keyboardShortcut("t", modifiers: [.command])
                 Button("Next Temperament") { host.model.cycleTuning() }
                     .keyboardShortcut("y", modifiers: [.command])
+            }
+            CommandMenu("Pulse") {
+                Button(host.model.pulseRunning ? "Stop Pulse" : "Start Pulse") {
+                    host.model.togglePulse()
+                }
+                .keyboardShortcut("p", modifiers: [.command, .option])
+                Button("Tap Tempo") { host.model.tapTempo() }
+                    .keyboardShortcut("k", modifiers: [.command])
+                Button("Realign Lanes") { host.model.realignPulse() }
+                    .keyboardShortcut("k", modifiers: [.command, .shift])
+                Divider()
+                ForEach(PulsePreset.all) { p in
+                    Button(p.name) { host.model.applyPulsePreset(p.id) }
+                }
+                Divider()
+                Button("All Lanes Off") { host.model.allLanesOff() }
             }
         }
     }

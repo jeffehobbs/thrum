@@ -163,7 +163,7 @@
   </div>
   <div class="cover-foot">
     <span>Instructions — every control, every key</span>
-    <span>Jeff Hobbs · v1.0</span>
+    <span>Jeff Hobbs · v1.1</span>
   </div>
 </section>
 
@@ -203,7 +203,8 @@
     <tr><td class="v">2</td><td>Click <strong>Tanpura</strong> under Voicings. Four tones swell in over about seven seconds.</td></tr>
     <tr><td class="v">3</td><td>Let it settle for half a minute. It should never sound quite the same twice.</td></tr>
     <tr><td class="v">4</td><td>Add or remove tones from the grid. ⌥-click one to give it a sitar buzz.</td></tr>
-    <tr><td class="v">5</td><td>When you're done, <span class="kbd">⌘.</span> lets everything go gracefully.</td></tr>
+    <tr><td class="v">5</td><td>Under Pulse, press <strong>Run</strong>. The chord you are holding starts to arpeggiate through itself, two lanes at different rates. <strong>TAP</strong> four times to set the tempo by hand.</td></tr>
+    <tr><td class="v">6</td><td>When you're done, <span class="kbd">⌘.</span> lets everything go gracefully.</td></tr>
   </table>
 
   <h3>Why it doesn't get boring</h3>
@@ -398,9 +399,33 @@
         <tr><td class="k">Hover</td><td>Tooltip with the exact frequency in hertz.</td></tr>
       </table>
       <h4>Voicings</h4>
-      <p><small>Each fades whatever is sounding and builds a new stack. A good drone is a specific voicing, not just "the notes of the chord".</small></p>
+      <p><small>Fifteen of them, on the next page. Each fades whatever is sounding and builds a new stack, because a good drone is a specific voicing and not just "the notes of the chord".</small></p>
     </div>
   </div>
+
+  <h3>Transport</h3>
+  <table>
+    <tr><td class="k">Let go <span class="v">⌘.</span></td><td>Everything fades at the <em>Fade</em> setting. The reverb tail continues.</td></tr>
+    <tr><td class="k">Cut short <span class="v">⇧⌘.</span></td><td>Everything gone in 1.2 seconds. Tail continues.</td></tr>
+    <tr><td class="k">Silence <span class="v">⌘⌫</span></td><td>Immediate. Voices killed, levels zeroed, <strong>and the reverb tail cleared.</strong></td></tr>
+    <tr><td class="k">Menu</td><td>The <strong>Drone</strong> menu holds all fifteen voicings, <span class="kbd">⌘T</span> next timbre and <span class="kbd">⌘Y</span> next temperament. The <strong>Pulse</strong> menu holds the clock and its presets.</td></tr>
+  </table>
+
+  <h3>Status bar</h3>
+  <p>Names whatever you last touched — the note and its exact frequency, the temperament's character, the voicing's intent — then falls back to the current key and reference pitch after a few seconds. On the right, a count of how many tones are holding.</p>
+</section>
+
+
+<!-- ═══════════════════════════ APP: VOICINGS ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 6</div>
+  </div>
+
+  <h1>Voicings</h1>
+  <p class="lede">Fifteen starting points. Each fades whatever is sounding and builds a new stack in the mode you are already in.</p>
 
   <table>
     <tr><td class="k">Open Fifths</td><td>Root and fifth in three registers. Nothing to argue with — the safest bed under any soloist.</td></tr>
@@ -410,16 +435,132 @@
     <tr><td class="k">Pedal Root</td><td>One low root and its octave. The strictest tonal centre.</td></tr>
   </table>
 
-  <h3>Transport</h3>
+  <h3>Borrowed from ten traditions</h3>
+  <p>What is worth taking from people who have been holding drones for centuries is not the scale — Thrum already has the modes — but <strong>which interval a tradition leaves out, and which register it puts the rest in</strong>.</p>
   <table>
-    <tr><td class="k">Let go <span class="v">⌘.</span></td><td>Everything fades at the <em>Fade</em> setting. The reverb tail continues.</td></tr>
-    <tr><td class="k">Cut short <span class="v">⇧⌘.</span></td><td>Everything gone in 1.2 seconds. Tail continues.</td></tr>
-    <tr><td class="k">Silence <span class="v">⌘⌫</span></td><td>Immediate. Voices killed, levels zeroed, <strong>and the reverb tail cleared.</strong></td></tr>
-    <tr><td class="k">Menu</td><td>The <strong>Drone</strong> menu also holds all five voicings, <span class="kbd">⌘T</span> next timbre and <span class="kbd">⌘Y</span> next temperament.</td></tr>
+    <tr><th style="width:19%">Voicing</th><th style="width:14%">From</th><th></th></tr>
+    <tr><td class="k">Highland</td><td class="v">Scotland</td><td>Great Highland pipes: a bass drone an octave under two tenors, and <strong>no fifth anywhere</strong>.</td></tr>
+    <tr><td class="k">Uilleann</td><td class="v">Ireland</td><td>Three drones an octave apart, with the regulators' triad sitting on top.</td></tr>
+    <tr><td class="k">Gaida</td><td class="v">Bulgaria</td><td>The tonic under a second, in the same register — the rub village singing is built on.</td></tr>
+    <tr><td class="k">Aitake</td><td class="v">Japan</td><td>The shō's gagaku cluster: fourths and seconds over two octaves, every pipe the same weight, <strong>nothing in the bass</strong>.</td></tr>
+    <tr><td class="k">Launeddas</td><td class="v">Sardinia</td><td>The triple pipe — the tumbu's low drone with a fourth and a fifth laid over it.</td></tr>
+    <tr><td class="k">Georgian</td><td class="v">Georgia</td><td>Village polyphony over the bass: fifth, fourth and a bare seventh, and <strong>no third at all</strong>.</td></tr>
+    <tr><td class="k">Didgeridoo</td><td class="v">Australia</td><td>One fundamental and its own harmonic series, at harmonic-series levels. Almost all bottom.</td></tr>
+    <tr><td class="k">Hardanger</td><td class="v">Norway</td><td>The hardingfele's sympathetic understrings, ringing quietly <strong>in one high register</strong>.</td></tr>
+    <tr><td class="k">Gyütö</td><td class="v">Tibet</td><td>Gyütö chant, with the fifth down <strong>in the lowest register</strong>, where nobody else puts one.</td></tr>
+    <tr><td class="k">Guqin</td><td class="v">China</td><td>The qin's open strings — pentatonic, so no fourth and no seventh, over all four octaves.</td></tr>
   </table>
 
-  <h3>Status bar</h3>
-  <p>Names whatever you last touched — the note and its exact frequency, the temperament's character, the voicing's intent — then falls back to the current key and reference pitch after a few seconds. On the right, a count of how many tones are holding.</p>
+  <div class="callout">
+    <strong>Two of these want other settings moved with them.</strong> <strong>Gaida</strong> is a beating
+    interval by design, so turn <em>Beating</em> down or the second and the tonic fight twice
+    over. <strong>Aitake</strong> and <strong>Hardanger</strong> deliberately hold nothing in the bottom octave —
+    reach for <em>Warmth</em> if the room needs a floor.
+  </div>
+
+  <p><small>
+    Each is described in scale degrees, and not every mode has the flavour of fourth or
+    fifth the original was built on — so every degree falls back, and failing that takes
+    whichever degree simply sits in that position. Two can still land on one pad in a mode
+    that hasn't got both: whole tone has no perfect fourth or fifth, only the tritone
+    between them.
+  </small></p>
+</section>
+
+<!-- ═══════════════════════════ APP: PULSE ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 7</div>
+  </div>
+
+  <h1>Pulse</h1>
+  <p class="lede">A tempo, and four arpeggiators running over the drone at the same time.</p>
+
+  <p>
+    An arpeggio in Thrum is not a sequence of notes. It is an <strong>accent on a voice that is
+    already sounding</strong>: the drone keeps holding exactly as it was, and the pulse rides a
+    fast attack-and-decay envelope on top of whichever voice it is pointing at. Tap in a
+    chord, press <strong>Run</strong>, and the chord starts to shimmer through itself. Stop the pulse
+    and the drone is still standing, untouched.
+  </p>
+  <p>
+    Because the accent is <em>added</em> rather than substituted, a tone that is <em>not</em> being held
+    will sound for as long as its ring — so a lane can play degrees that aren't in the
+    drone at all, over the top of the ones that are.
+  </p>
+
+  <h3>Transport</h3>
+  <table>
+    <tr><td class="k">TAP <span class="v">⌘K</span></td><td>Tap four times in time with the room. The last tap is the downbeat, and it drops every lane back onto beat zero — so re-aligning to a drummer is one gesture.</td></tr>
+    <tr><td class="k">Tempo</td><td>20–200 bpm. The <strong>−</strong> and <strong>+</strong> step it by one; there is a slider under <em>Pulse</em> in the parameter column too.</td></tr>
+    <tr><td class="k">Beat dots</td><td>Four dots, one bar. The first is amber so you can find the downbeat without counting.</td></tr>
+    <tr><td class="k">Presets</td><td>Eight whole-rig starting points, plus <em>all lanes off</em> and <em>realign lanes</em>.</td></tr>
+    <tr><td class="k">Run <span class="v">⌥⌘P</span></td><td>Starts and stops the clock, and realigns every lane when it starts. <strong>PANIC</strong> stops the clock as well as the voices.</td></tr>
+  </table>
+
+  <h3>A lane</h3>
+  <p><small>Four identical ones. The number at the left arms it; the dot beside the number lights as that lane strikes.</small></p>
+  <table>
+    <tr><td class="k" style="width:16%">Source</td><td><strong>Held</strong> — the degrees you are holding, echoed into this lane's registers, so one chord tapped in low can arpeggiate in four octaves without tapping it in four times. <strong>Chord</strong> — the chord tones of the mode. <strong>Scale</strong> — every degree. <strong>Root</strong> — a pedal. <strong>Colour</strong> — the degrees the chord leaves out, which is where the good lanes usually are.</td></tr>
+    <tr><td class="k">Pattern</td><td>Up · Down · Up·Down · Down·Up · Converge (outside in) · Diverge (inside out) · Pinwheel (a stride coprime with the set, so it covers everything in an order you can't predict) · Scatter (random, but the same random every time) · Chord (all at once — a pulse rather than an arpeggio).</td></tr>
+    <tr><td class="k">Rate</td><td>×½ ×¾ ×1 ×1½ ×2 ×3 ×4 ×6 steps per beat.</td></tr>
+    <tr><td class="k">Register</td><td>Which of the four octaves the lane works in — one, a pair, or all four.</td></tr>
+    <tr><td class="k">Offset</td><td>Shoves the lane a quarter beat later. The cheapest way to turn two lanes that are locked together into two that are chasing each other.</td></tr>
+    <tr><td class="k">Level</td><td>How far above the drone that lane sits.</td></tr>
+  </table>
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 8</div>
+  </div>
+
+  <h1>Rates, and the eight presets</h1>
+  <p class="lede">Four lanes at four rates is where the hypnosis is. Getting there is mostly a matter of not letting two of them agree.</p>
+
+  <h3>Rates are ratios, not note values</h3>
+  <p>
+    The interesting divisions here are the ones that fight. A lane at <strong>×1</strong> against a lane
+    at <strong>×1½</strong> takes six beats to come back around; <strong>×1</strong> against <strong>×6</strong> with a five-note
+    set and a seven-step accent takes long enough that you stop hearing a loop at all.
+    That drift is the whole point, and it is why the rates are written as ratios rather
+    than as eighths and sixteenths.
+  </p>
+  <p>
+    Give each lane its own <strong>register</strong> and they never collide — four lanes, four octaves,
+    four speeds. Give two lanes the same register and the same rate but different
+    <strong>offsets</strong> and they chase each other instead.
+  </p>
+
+  <div class="callout">
+    <strong>Arpeggiate a tone with jawari armed.</strong> A plucked note through the bridge buzz is
+    what a sitar actually is, and it is the one combination in Thrum where two features
+    add up to a third thing.
+  </div>
+
+  <h3>Presets</h3>
+  <table>
+    <tr><th style="width:16%">Preset</th><th style="width:9%">bpm</th><th></th></tr>
+    <tr><td class="k">Pulse</td><td class="n">64</td><td>One lane, one note a beat. The plainest thing that still moves.</td></tr>
+    <tr><td class="k">Three : Two</td><td class="n">68</td><td>Two lanes, one and a half against one. Comes round every six beats.</td></tr>
+    <tr><td class="k">Tanpura</td><td class="n">52</td><td>A pedal underneath, the held chord walking above it.</td></tr>
+    <tr><td class="k">Gamelan</td><td class="n">76</td><td>Four registers, four rates, chord tones low and colour up top.</td></tr>
+    <tr><td class="k">Phase</td><td class="n">96</td><td>Same figure, four rates, four starting points. Give it two minutes.</td></tr>
+    <tr><td class="k">Rain</td><td class="n">60</td><td>A slow root, and scatter falling through the top two octaves.</td></tr>
+    <tr><td class="k">Undertow</td><td class="n">48</td><td>Half-time and three-quarter time, low and slow. Barely an arpeggio.</td></tr>
+    <tr><td class="k">Swarm</td><td class="n">108</td><td>Everything at once, quietly. Individual notes stop being audible.</td></tr>
+  </table>
+
+  <p><small>
+    The clock runs off the main thread, so the pulse doesn't stutter when the window
+    redraws. Step numbers are absolute positions on that clock rather than a running
+    index, which means a lane keeps its place in the bar even if you add a note to the
+    chord underneath it mid-figure.
+  </small></p>
 </section>
 
 <!-- ═══════════════════════════ APP: PARAMETERS ═══════════════════════════ -->
@@ -427,11 +568,11 @@
   <div class="head">
     <img src="ICON" alt="">
     <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
-    <div class="pagetag">The Mac app · 6</div>
+    <div class="pagetag">The Mac app · 9</div>
   </div>
 
   <h1>Parameters</h1>
-  <p class="lede">Twenty sliders in four groups. Hovering any of them shows what it does; the value on the right is live.</p>
+  <p class="lede">Twenty-six sliders in five groups. Hovering any of them shows what it does — the label fades in without moving anything — and the value on the right is live.</p>
 
   <h3>Voice — how a tone behaves</h3>
   <table>
@@ -461,7 +602,7 @@
   <div class="head">
     <img src="ICON" alt="">
     <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
-    <div class="pagetag">The Mac app · 7</div>
+    <div class="pagetag">The Mac app · 10</div>
   </div>
 
   <h1>Parameters, continued</h1>
@@ -482,6 +623,29 @@
     <tr><th>Control</th><th>Range</th><th>Default</th><th></th></tr>
     <tr><td class="k">Swell Ride</td><td class="v">0–100%</td><td class="n">100%</td><td>Rides everything sounding at once. Live dynamics for the whole drone — the thing to grab when the soloist drops to a whisper.</td></tr>
     <tr><td class="k">Output</td><td class="v">0–100%</td><td class="n">85%</td><td>Master level, after the limiter.</td></tr>
+  </table>
+
+</section>
+
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 11</div>
+  </div>
+
+  <h1>Parameters · the pulse</h1>
+  <p class="lede">The six that shape the arpeggios. <em>Strike</em> and <em>Ring</em> are the two that change the character most — they are the difference between a marimba inside the drone and the chord simply breathing.</p>
+
+  <h3>Pulse — the arpeggios</h3>
+  <table>
+    <tr><th>Control</th><th>Range</th><th>Default</th><th></th></tr>
+    <tr><td class="k">Tempo</td><td class="v">20–200 bpm</td><td class="n">68</td><td>The beat every lane divides. Tap it in rather than typing it.</td></tr>
+    <tr><td class="k">Strike</td><td class="v">2–600 ms</td><td class="n">35 ms</td><td>How sharply an arpeggiated note arrives. Short is a pluck, long is a bow. Under about 10 ms a stack of pure partials starts to click.</td></tr>
+    <tr><td class="k">Ring</td><td class="v">0.05–9 s</td><td class="n">1.4 s</td><td>How long it takes to fall back into the drone. Past a couple of seconds the notes stop being separate and the chord simply breathes.</td></tr>
+    <tr><td class="k">Accent</td><td class="v">0–100%</td><td class="n">70%</td><td>How far above the drone the arpeggio sits. Low is a shimmer inside the chord; high is a part.</td></tr>
+    <tr><td class="k">Swing</td><td class="v">0–70%</td><td class="n">0%</td><td>Pushes every other step late by a fraction of <em>that lane's own</em> step, so lanes at different rates all swing together.</td></tr>
+    <tr><td class="k">Unsteady</td><td class="v">0–100%</td><td class="n">22%</td><td>Velocity wobble, the same every time round. Without a little of it a long cycle reads as a machine.</td></tr>
   </table>
 
   <h3>Launch Control panel</h3>
@@ -712,12 +876,99 @@
   <table>
     <tr><td class="k">KEY ◀ ▶</td><td>Move the key by a semitone. Held tones glide.</td></tr>
     <tr><td class="k">OCT ◀ ▶</td><td>Move the whole grid by an octave, 1–6.</td></tr>
-    <tr><td class="k">BANK</td><td>Swap row 1 between mode bank A (diatonic) and B (colour). Dim blue for A, violet for B.</td></tr>
+    <tr><td class="k">BANK</td><td><strong>Tap</strong> to swap row 1 between mode bank A (diatonic) and B (colour) — dim blue for A, violet for B. <strong>Hold</strong> it and the whole board becomes the arpeggiator page, on the next page. It only cycles the bank if you let go without having pressed anything else.</td></tr>
     <tr><td class="k">TIMB</td><td>Next timbre. Lit in the current timbre's colour.</td></tr>
     <tr><td class="k">TUNE</td><td>Next temperament.</td></tr>
     <tr><td class="k">PANIC</td><td>Immediate silence, reverb tail included.</td></tr>
     <tr><td class="k">Right column</td><td>An eight-step output ladder, lit from the bottom up — green at the bottom, amber at the top, readable in the dark. The bottom pad is a mute: every tone keeps holding behind it.</td></tr>
     <tr><td class="k">Logo</td><td>Output indicator only. Breathes with the level, in the current mode's colour.</td></tr>
+  </table>
+</section>
+
+
+<!-- ═══════════════════════════ LAUNCHPAD: ARP PAGE ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">Launchpad X · arp page</div>
+  </div>
+
+  <h1>Hold BANK · the arpeggiator</h1>
+  <p class="lede">
+    A second layer over the whole board. Nothing was taken away to make room for it:
+    tapping BANK still cycles the mode bank, and it only does so if you release it
+    without having pressed anything else.
+  </p>
+
+  <div class="lp" style="max-width:108mm; margin:5pt auto 3pt">
+    <div></div>
+    <div class="cell round top">BPM −<span class="cc">91</span></div>
+    <div class="cell round top">BPM +<span class="cc">92</span></div>
+    <div class="cell round top">−5<span class="cc">93</span></div>
+    <div class="cell round top">+5<span class="cc">94</span></div>
+    <div class="cell round tonec">BANK<span class="cc">held</span></div>
+    <div class="cell round tonec">TAP<span class="cc">96</span></div>
+    <div class="cell round mod">SWING<span class="cc">97</span></div>
+    <div class="cell round panic">PANIC<span class="cc">98</span></div>
+    <div></div>
+
+    <div class="rowlab">8</div>
+    <div class="cell mod">×½</div><div class="cell mod">×¾</div><div class="cell mod">×1</div><div class="cell mod">×1½</div>
+    <div class="cell mod">×2</div><div class="cell mod">×3</div><div class="cell mod">×4</div><div class="cell mod">×6</div>
+    <div class="cell round lad">100%</div>
+
+    <div class="rowlab">7</div>
+    <div class="cell timb">×½</div><div class="cell timb">×¾</div><div class="cell timb">×1</div><div class="cell timb">×1½</div>
+    <div class="cell timb">×2</div><div class="cell timb">×3</div><div class="cell timb">×4</div><div class="cell timb">×6</div>
+    <div class="cell round lad">86%</div>
+
+    <div class="rowlab">6</div>
+    <div class="cell lad">×½</div><div class="cell lad">×¾</div><div class="cell lad">×1</div><div class="cell lad">×1½</div>
+    <div class="cell lad">×2</div><div class="cell lad">×3</div><div class="cell lad">×4</div><div class="cell lad">×6</div>
+    <div class="cell round lad">71%</div>
+
+    <div class="rowlab">5</div>
+    <div class="cell tonec">×½</div><div class="cell tonec">×¾</div><div class="cell tonec">×1</div><div class="cell tonec">×1½</div>
+    <div class="cell tonec">×2</div><div class="cell tonec">×3</div><div class="cell tonec">×4</div><div class="cell tonec">×6</div>
+    <div class="cell round lad">57%</div>
+
+    <div class="rowlab">4</div>
+    <div class="cell tonec">PAT 1</div><div class="cell lad">PAT 2</div><div class="cell timb">PAT 3</div><div class="cell mod">PAT 4</div>
+    <div class="cell tonec">REG 1</div><div class="cell lad">REG 2</div><div class="cell timb">REG 3</div><div class="cell mod">REG 4</div>
+    <div class="cell round lad">43%</div>
+
+    <div class="rowlab">3</div>
+    <div class="cell tonec">OFF 1</div><div class="cell lad">OFF 2</div><div class="cell timb">OFF 3</div><div class="cell mod">OFF 4</div>
+    <div class="cell tonec">SRC 1</div><div class="cell lad">SRC 2</div><div class="cell timb">SRC 3</div><div class="cell mod">SRC 4</div>
+    <div class="cell round lad">29%</div>
+
+    <div class="rowlab">2</div>
+    <div class="cell tone">TAP</div><div class="cell lad">RUN</div><div class="cell panic">OFF</div><div class="cell tune">ALIGN</div>
+    <div class="cell timb">÷2</div><div class="cell timb">×2</div><div class="cell mod">SWING</div><div class="cell mod">UNST</div>
+    <div class="cell round lad">14%</div>
+
+    <div class="rowlab">1</div>
+    <div class="cell tone">1</div><div class="cell tone">2</div><div class="cell tone">3</div><div class="cell tone">4</div>
+    <div class="cell tone">5</div><div class="cell tone">6</div><div class="cell tone">7</div><div class="cell tone">8</div>
+    <div class="cell round lad">mute</div>
+  </div>
+
+  <div class="legend">
+    <span><strong>Rows 8–5</strong> one lane each — 5 is lane 1, 8 is lane 4</span>
+    <span><strong>Row 4</strong> pattern, then register</span>
+    <span><strong>Row 3</strong> offset, then source</span>
+    <span><strong>Row 2</strong> transport</span>
+    <span><strong>Row 1</strong> the eight presets</span>
+  </div>
+
+  <h3>How it plays</h3>
+  <table>
+    <tr><td class="k">Rows 8–5</td><td>One row per lane, one pad per rate. Pressing a rate <strong>arms</strong> the lane as well as setting it; pressing the rate already lit turns the lane off. Keep a finger here — retuning the polyrhythm live is the most useful gesture on the page.</td></tr>
+    <tr><td class="k">Rows 4 · 3</td><td>Lane <em>N</em> is always column <em>N</em>, so the lanes read as four vertical stripes in the app's own four colours. Each pad cycles that lane's pattern, register, offset or source forward by one.</td></tr>
+    <tr><td class="k">Row 2</td><td>TAP · RUN · all lanes off · realign · halve · double · swing · unsteady. RUN breathes on the beat while the clock is going.</td></tr>
+    <tr><td class="k">Row 1</td><td>The eight presets. One press replaces all four lanes and the tempo.</td></tr>
+    <tr><td class="k">Top row</td><td>Tempo by ±1 and ±5, and <strong>TAP</strong> sitting right beside BANK so one hand holds while the other taps. PANIC stays PANIC — the one key that means the same thing on every layer.</td></tr>
   </table>
 </section>
 
@@ -738,7 +989,7 @@
     <tr><td class="k">Both models</td><td>The <strong>Launch Control</strong> (16 knobs) and the <strong>Launch Control XL</strong> (24 knobs + 8 faders) are told apart automatically and get different factory-template CC maps.</td></tr>
     <tr><td class="k">Soft takeover</td><td>A knob does nothing until it passes through the parameter's current value, so grabbing one never jumps the sound mid-performance.</td></tr>
     <tr><td class="k">MIDI learn</td><td>Click a parameter's name in the app, then move a knob. The binding is saved and survives relaunching.</td></tr>
-    <tr><td class="k">Pads</td><td>Trigger the five voicings, plus let-go and panic.</td></tr>
+    <tr><td class="k">Pads</td><td>Trigger the first six voicings, plus let-go and panic. Capped at six on purpose: there are fifteen voicings now, and letting them fill all eight pads would cost the panic button.</td></tr>
   </table>
   <p><small>
     Both devices report themselves as "Launch Control"; only the XL appends "XL", and
@@ -750,9 +1001,10 @@
   <p class="mono" style="color:var(--soft); font-size:8.2pt; line-height:1.7">
     Swell · Fade · Beating · Drift · Motion · Sitar Depth · New Tone Level · Swell Ride<br>
     Brightness · Warmth · Presence Cut · Air · Saturation · Width · Field Drift · Output<br>
-    Decay · Wet · Damping · Size
+    Decay · Wet · Damping · Size<br>
+    Tempo · Strike · Ring · Accent · Swing · Unsteady
   </p>
-  <p><small>A 16-knob Launch Control reaches the first sixteen; the XL reaches all twenty.</small></p>
+  <p><small>A 16-knob Launch Control reaches the first sixteen; the XL's 32 controls reach all twenty-six. The pulse controls sit last so that adding them didn't move anybody's existing knobs.</small></p>
 
 </section>
 
@@ -771,6 +1023,9 @@
     <tr><td class="k">Launchpad in the wrong mode</td><td>Thrum uses the "LPX MIDI" port, not "LPX DAW". If another app has claimed the device or left it in a different mode, quit that app and replug.</td></tr>
     <tr><td class="k">Sitar Depth does nothing</td><td>Expected on timbres with no floor. Arm a tone first: ⌥-click, or hold SITAR and tap.</td></tr>
     <tr><td class="k">A tone won't tap off</td><td>You're pressing too hard or too long and it reads as a level ride. Hold <strong>LET GO</strong> and tap it instead.</td></tr>
+    <tr><td class="k">Pulse is running but silent</td><td>Every lane defaults to the <strong>Held</strong> source, so it needs tones held to arpeggiate. Either tap a chord in, or switch a lane to <strong>Chord</strong> or <strong>Scale</strong>, which draw from the mode whether or not anything is sounding.</td></tr>
+    <tr><td class="k">Arpeggio sounds mechanical</td><td>Raise <strong>Unsteady</strong>, and give two lanes rates that don't divide into each other — ×1 with ×1½ rather than ×1 with ×2. Equal rates lock; unequal ones drift.</td></tr>
+    <tr><td class="k">Arpeggio buries the drone</td><td>Lower <strong>Accent</strong>, or lengthen <strong>Ring</strong> so the notes overlap into the chord instead of standing out of it.</td></tr>
     <tr><td class="k">Everything sounds still</td><td>Beating, Drift or Motion is at zero. Those three are what keep it alive.</td></tr>
     <tr><td class="k">Tiring after a while</td><td>Raise <strong>Presence Cut</strong>. Energy around 2–5 kHz is what wears the ear out over twenty minutes.</td></tr>
   </table>

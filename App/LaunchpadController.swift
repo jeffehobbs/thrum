@@ -22,6 +22,24 @@ import Combine
 /// aftertouch rides that tone's level. Row 2 pads are all hold-and-press
 /// modifiers — they push a parameter while held and restore it on release —
 /// except SITAR, which turns tone pads into jawari toggles while held.
+///
+/// **Hold BANK** and the whole board becomes the arpeggiator page. Nothing is
+/// taken away to make room for it: tapping BANK still cycles the mode bank,
+/// and it only cycles if you let go without having pressed anything else.
+///
+/// ```
+///   BPM− BPM+ BPM−5 BPM+5 [BANK] TAP SWING PANIC
+///  ┌────────────────────────────────────────────┐
+///  │ 8  lane 4 — rate ×½ … ×6                   │
+///  │ 7  lane 3 — rate                           │
+///  │ 6  lane 2 — rate                           │
+///  │ 5  lane 1 — rate  (press the lit one = off)│
+///  │ 4  pattern ×4 · register ×4                │
+///  │ 3  offset  ×4 · source   ×4                │
+///  │ 2  tap run off align ÷2 ×2 swing unsteady  │
+///  │ 1  presets 1…8                             │
+///  └────────────────────────────────────────────┘
+/// ```
 @MainActor
 final class LaunchpadController {
     private unowned let model: ThrumModel
@@ -79,6 +97,13 @@ final class LaunchpadController {
     /// Set when LET GO was used to drop individual tones, so releasing it
     /// doesn't also let go of everything.
     private var letGoDroppedTones = false
+    /// Top-row and right-column buttons currently down.
+    private var heldCC: Set<Int> = []
+    /// Same idea as `letGoDroppedTones`: BANK only cycles the mode bank if you
+    /// let go of it without having used the arp page underneath.
+    private var bankUsedAsPage = false
+    /// True while BANK is held — the board is showing the arpeggiator.
+    private var arpPage: Bool { heldCC.contains(Top.bank.rawValue) }
     /// Base values stashed while a modifier is pushing a parameter.
     private var pushBase: [Param: Double] = [:]
 
@@ -166,6 +191,11 @@ final class LaunchpadController {
     private func handleGrid(note: Int, value: Int, phase: Phase) {
         let frac = Double(value) / 127.0
 
+        if arpPage {
+            if phase == .down { handleArpGrid(note: note) }
+            return
+        }
+
         if let pad = Self.pad(forNote: note) {
             if held.contains(Modifier.sitar.rawValue) {
                 if phase == .down { model.toggleSitar(pad: pad) }
@@ -218,6 +248,44 @@ final class LaunchpadController {
                 let index = model.modeBank * ModeCatalog.bankSize + col
                 if index < ModeCatalog.all.count { model.setMode(index) }
             }
+        default:
+            break
+        }
+    }
+
+    /// The arpeggiator page, live only while BANK is held. Tone rows are the
+    /// four lanes and their eight rates; the control rows are everything else
+    /// a lane has, laid out four-and-four so lane N is always column N.
+    private func handleArpGrid(note: Int) {
+        bankUsedAsPage = true
+
+        if let pad = Self.pad(forNote: note) {
+            model.setLaneDivision(pad / Harmony.cols, pad % Harmony.cols)
+            return
+        }
+
+        let row = note / 10
+        let col = note % 10 - 1
+        guard (1...4).contains(row), (0...7).contains(col) else { return }
+
+        switch row {
+        case 1:
+            model.applyPulsePreset(col)
+        case 2:
+            switch col {
+            case 0: model.tapTempo()
+            case 1: model.togglePulse()
+            case 2: model.allLanesOff()
+            case 3: model.realignPulse()
+            case 4: model.scaleTempo(0.5)
+            case 5: model.scaleTempo(2.0)
+            case 6: model.cycleSwing()
+            default: model.cycleHumanize()
+            }
+        case 3:
+            if col < 4 { model.nudgeLanePhase(col) } else { model.cycleLaneSource(col - 4) }
+        case 4:
+            if col < 4 { model.cycleLanePattern(col) } else { model.cycleLaneSpan(col - 4) }
         default:
             break
         }
@@ -307,14 +375,42 @@ final class LaunchpadController {
     }
 
     private func handleButton(cc: Int, value: Int) {
-        guard value > 0 else { return }  // these send 127 down, 0 up
+        // These send 127 down, 0 up. BANK is the one that cares about the
+        // release, because holding it is the arp page.
+        guard value > 0 else {
+            heldCC.remove(cc)
+            if cc == Top.bank.rawValue && !bankUsedAsPage { model.cycleModeBank() }
+            return
+        }
+        heldCC.insert(cc)
+
+        if cc == Top.bank.rawValue {
+            bankUsedAsPage = false
+            model.show("Arp page — rows are lanes, columns are rates")
+            return
+        }
+
         if let top = Top(rawValue: cc) {
+            if arpPage {
+                bankUsedAsPage = true
+                switch top {
+                case .keyDown:    model.nudgeTempo(-1)
+                case .keyUp:      model.nudgeTempo(1)
+                case .octaveDown: model.nudgeTempo(-5)
+                case .octaveUp:   model.nudgeTempo(5)
+                case .timbre:     model.tapTempo()
+                case .tuning:     model.cycleSwing()
+                case .panic:      model.panic()
+                case .bank:       break
+                }
+                return
+            }
             switch top {
             case .keyDown:    model.nudgeKey(-1)
             case .keyUp:      model.nudgeKey(1)
             case .octaveDown: model.nudgeOctave(-1)
             case .octaveUp:   model.nudgeOctave(1)
-            case .bank:       model.cycleModeBank()
+            case .bank:       break  // handled above
             case .timbre:     model.cycleTimbre()
             case .tuning:     model.cycleTuning()
             case .panic:      model.panic()
@@ -332,9 +428,84 @@ final class LaunchpadController {
 
     private func paint() {
         guard surface.isConnected else { return }
-        paintTones()
-        paintControls()
+        if arpPage {
+            paintArpTones()
+            paintArpControls()
+        } else {
+            paintTones()
+            paintControls()
+        }
         paintButtons()
+    }
+
+    /// Tone block as the arp page: one row per lane, one column per rate.
+    private func paintArpTones() {
+        var msg: [UInt8] = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x0C, 0x03]
+        let now = PulseCore.now()
+        for pad in 0..<Harmony.padCount {
+            let lane = pad / Harmony.cols
+            let col = pad % Harmony.cols
+            let l = model.lanes[lane]
+            let hue = PulseCore.laneHues[lane]
+            let (r, g, b): (UInt8, UInt8, UInt8)
+            if l.enabled && l.divisionIndex == col {
+                // The selected rate flashes as that lane strikes.
+                let hit = max(0, 1 - (now - model.pulse.laneFlash[lane]) / 0.18)
+                (r, g, b) = MIDISurface.rgb(hue: hue, brightness: 0.55 + 0.45 * hit)
+            } else if l.enabled {
+                (r, g, b) = MIDISurface.rgb(hue: hue, brightness: 0.11, saturation: 0.7)
+            } else {
+                (r, g, b) = (3, 3, 7)
+            }
+            msg.append(contentsOf: [0x03, UInt8(Self.toneNote(pad: pad)), r, g, b])
+        }
+        msg.append(0xF7)
+        guard msg != lastToneMessage else { return }
+        lastToneMessage = msg
+        surface.send(msg)
+    }
+
+    /// Control rows as the arp page. Lane N is column N throughout, so the
+    /// four lanes read as four vertical stripes whichever row you are on.
+    private func paintArpControls() {
+        var msg: [UInt8] = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x0C, 0x03]
+
+        // Rows 4 and 3 — pattern, register, offset, source. Four and four.
+        for (base, brightLeft) in [(41, 0.34), (31, 0.24)] {
+            for i in 0..<8 {
+                let lane = i % 4
+                let hue = PulseCore.laneHues[lane]
+                let on = model.lanes[lane].enabled
+                let level = (i < 4 ? brightLeft : brightLeft * 0.6) * (on ? 1 : 0.3)
+                let (r, g, b) = MIDISurface.rgb(hue: hue, brightness: level)
+                msg.append(contentsOf: [0x03, UInt8(base + i), r, g, b])
+            }
+        }
+
+        // Row 2 — the transport. Run breathes on the beat.
+        let beat = model.pulse.displayBeat
+        let onBeat = 1.0 - (beat - floor(beat))
+        let hues: [Double] = [0.13, 0.36, 0.00, 0.50, 0.60, 0.60, 0.78, 0.86]
+        for i in 0..<8 {
+            var level = 0.16
+            if i == 1 { level = model.pulseRunning ? 0.25 + 0.75 * onBeat : 0.2 }
+            if i == 6 && model.swing > 0.01 { level = 0.7 }
+            if i == 7 && model.humanize > 0.01 { level = 0.7 }
+            let (r, g, b) = MIDISurface.rgb(hue: hues[i], brightness: level)
+            msg.append(contentsOf: [0x03, UInt8(21 + i), r, g, b])
+        }
+
+        // Row 1 — presets.
+        for i in 0..<8 {
+            let on = model.pulsePreset == i
+            let (r, g, b) = MIDISurface.rgb(hue: 0.09, brightness: on ? 1.0 : 0.12)
+            msg.append(contentsOf: [0x03, UInt8(11 + i), r, g, b])
+        }
+
+        msg.append(0xF7)
+        guard msg != lastControlMessage else { return }
+        lastControlMessage = msg
+        surface.send(msg)
     }
 
     private func paintTones() {
@@ -415,13 +586,23 @@ final class LaunchpadController {
     private func paintButtons() {
         var msg: [UInt8] = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x0C, 0x03]
         for top in Top.allCases {
-            let (r, g, b): (UInt8, UInt8, UInt8)
+            var (r, g, b): (UInt8, UInt8, UInt8)
             switch top {
             case .panic: (r, g, b) = (48, 4, 4)
             case .bank:  (r, g, b) = model.modeBank == 0 ? (10, 14, 30) : (40, 26, 70)
             case .timbre: (r, g, b) = MIDISurface.rgb(hue: TimbreCatalog.all[model.timbreIndex].hue, brightness: 0.35)
             case .tuning: (r, g, b) = (6, 30, 32)
             default: (r, g, b) = (22, 22, 26)
+            }
+            if arpPage {
+                // On the arp page the top row is the tempo, so it says so.
+                switch top {
+                case .bank:   (r, g, b) = (90, 70, 20)
+                case .timbre: (r, g, b) = MIDISurface.rgb(hue: 0.09, brightness: 0.9)   // TAP
+                case .tuning: (r, g, b) = MIDISurface.rgb(hue: 0.78, brightness: model.swing > 0.01 ? 0.8 : 0.2)
+                case .panic:  break
+                default:      (r, g, b) = MIDISurface.rgb(hue: 0.5, brightness: 0.28)
+                }
             }
             msg.append(contentsOf: [0x03, UInt8(top.rawValue), r, g, b])
         }

@@ -16,6 +16,8 @@ public enum Param: Int, CaseIterable, Identifiable, Sendable {
     case reverbDecay, reverbMix, reverbDamp, reverbSize, width, spatialDrift
     // Master
     case globalSwell, masterVolume
+    // Pulse — appended, so a saved Launch Control map keeps its numbering.
+    case tempo, pluckAttack, pluckDecay, arpLevel, swing, humanize
 
     public var id: Int { rawValue }
 }
@@ -25,6 +27,7 @@ public enum ParamGroup: String, CaseIterable, Identifiable {
     case tone = "Tone"
     case space = "Space"
     case master = "Master"
+    case pulse = "Pulse"
     public var id: String { rawValue }
 }
 
@@ -59,6 +62,8 @@ public struct ParamSpec {
 
     public func display(_ v: Double) -> String {
         if unit == "s" { return String(format: v < 10 ? "%.1f s" : "%.0f s", v) }
+        if unit == "ms" { return String(format: "%.0f ms", v * 1000) }
+        if unit == "bpm" { return String(format: "%.0f bpm", v) }
         if unit == "%" { return "\(Int((v * 100).rounded()))%" }
         return String(format: "%.2f", v)
     }
@@ -91,6 +96,21 @@ public final class ThrumModel: ObservableObject {
 
     @Published public var tones: [GridTone] = []
 
+    // MARK: Pulse
+
+    /// The clock and the four arpeggiators. Runs off the main thread; it is
+    /// handed a resolved plan whenever anything it depends on moves.
+    public let pulse: PulseCore
+
+    @Published public var pulseRunning = false { didSet { pulse.setRunning(pulseRunning); pulseChanged() } }
+    @Published public var tempo: Double = 68 { didSet { pulse.setTempo(tempo) } }
+    @Published public var lanes: [ArpLane] = ArpLane.defaults { didSet { pulseChanged() } }
+    @Published public var arpLevel: Double = 0.7 { didSet { pushFeel() } }
+    @Published public var swing: Double = 0 { didSet { pushFeel() } }
+    @Published public var humanize: Double = 0.22 { didSet { pushFeel() } }
+    /// Last preset applied, so the Launchpad can light it.
+    @Published public var pulsePreset: Int? = nil
+
     /// True when no voice is sounding *and* none is still fading. Drives the
     /// on-screen animation, which otherwise redraws a canvas twenty times a
     /// second to show nothing.
@@ -108,12 +128,23 @@ public final class ThrumModel: ObservableObject {
 
     public init(engine: DroneEngine) {
         self.engine = engine
+        pulse = PulseCore(engine: engine)
         values = Self.specs.map { $0.range.lowerBound }
         // Seed from the engine's own defaults.
         for (i, spec) in Self.specs.enumerated() { values[i] = spec.get(self) }
         engine.timbreIndex = Int32(timbreIndex)
         tones = harmony.tones()
         pushAllTunings()
+
+        // Tap tempo works the tempo out on the pulse queue; this is how the
+        // number gets back to the slider.
+        pulse.onTempo = { [weak self] bpm in
+            guard let self else { return }
+            self.set(.tempo, bpm)
+            self.show("Tap — \(Int(bpm.rounded())) bpm")
+        }
+        pushFeel()
+        pulseChanged()
 
         // Four hertz is enough to notice the last voice finishing its fade and
         // to keep a load readout honest, without being a load of its own.
@@ -143,7 +174,7 @@ public final class ThrumModel: ObservableObject {
 
     /// Split by group — one twenty-element literal of closures takes the Swift
     /// type checker an absurdly long time.
-    public static let specs: [ParamSpec] = voiceSpecs + toneSpecs + spaceSpecs + masterSpecs
+    public static let specs: [ParamSpec] = voiceSpecs + toneSpecs + spaceSpecs + masterSpecs + pulseSpecs
 
     private static let voiceSpecs: [ParamSpec] = [
         ParamSpec(param: .swell, name: "Swell", group: .voice, range: 0.4...40, unit: "s",
@@ -237,6 +268,33 @@ public final class ThrumModel: ObservableObject {
                   get: { Double($0.engine.masterVolume) }, set: { $0.engine.masterVolume = Float($1) }),
     ]
 
+    private static let pulseSpecs: [ParamSpec] = [
+        ParamSpec(param: .tempo, name: "Tempo", group: .pulse, range: 20...200, unit: "bpm",
+                  detail: "The beat every lane divides. Tap it in rather than typing it.",
+                  exponential: true,
+                  get: { $0.tempo }, set: { $0.tempo = min(200, max(20, $1)) }),
+        ParamSpec(param: .pluckAttack, name: "Strike", group: .pulse, range: 0.002...0.6, unit: "ms",
+                  detail: "How sharply an arpeggiated note arrives. Short is a pluck, long is a bow.",
+                  exponential: true,
+                  get: { $0.engine.pluckAttack }, set: { $0.engine.pluckAttack = $1 }),
+        ParamSpec(param: .pluckDecay, name: "Ring", group: .pulse, range: 0.05...9, unit: "s",
+                  detail: "How long it takes to fall back into the drone. Past a couple of seconds the notes stop being separate.",
+                  exponential: true,
+                  get: { $0.engine.pluckDecay }, set: { $0.engine.pluckDecay = $1 }),
+        ParamSpec(param: .arpLevel, name: "Accent", group: .pulse, range: 0...1, unit: "%",
+                  detail: "How far above the drone the arpeggio sits. Low is a shimmer inside the chord; high is a part.",
+                  exponential: false,
+                  get: { $0.arpLevel }, set: { $0.arpLevel = min(max($1, 0), 1) }),
+        ParamSpec(param: .swing, name: "Swing", group: .pulse, range: 0...0.7, unit: "%",
+                  detail: "Pushes every other step late, by a fraction of that lane's own step — so lanes at different rates all swing.",
+                  exponential: false,
+                  get: { $0.swing }, set: { $0.swing = min(max($1, 0), 0.7) }),
+        ParamSpec(param: .humanize, name: "Unsteady", group: .pulse, range: 0...1, unit: "%",
+                  detail: "Velocity wobble, the same every time round. Without a little of it a long cycle reads as a machine.",
+                  exponential: false,
+                  get: { $0.humanize }, set: { $0.humanize = min(max($1, 0), 1) }),
+    ]
+
     public static func spec(_ p: Param) -> ParamSpec {
         specs.first { $0.param == p } ?? specs[0]
     }
@@ -275,6 +333,8 @@ public final class ThrumModel: ObservableObject {
         // half a second, so changing mode mid-performance is a modulation
         // rather than an edit.
         pushAllTunings()
+        // Which columns count as chord tones just changed under the lanes.
+        pulseChanged()
     }
 
     private func pushAllTunings() {
@@ -341,7 +401,9 @@ public final class ThrumModel: ObservableObject {
 
     public func sound(pad: Int, level: Double) {
         guard pad >= 0, pad < Harmony.padCount else { return }
+        let wasOn = padOn[pad]
         padOn[pad] = true
+        if !wasOn { pulseChanged() }
         padLevel[pad] = min(max(level, 0.02), 1)
         engine.retune(pad: pad, frequency: tones[pad].frequency)
         engine.setLevel(pad: pad, level: padLevel[pad])
@@ -353,8 +415,10 @@ public final class ThrumModel: ObservableObject {
 
     public func release(pad: Int) {
         guard pad >= 0, pad < Harmony.padCount else { return }
+        let wasOn = padOn[pad]
         padOn[pad] = false
         engine.gate(pad: pad, on: false)
+        if wasOn { pulseChanged() }
     }
 
     /// Live level ride — used by pad aftertouch and by the on-screen faders.
@@ -366,6 +430,9 @@ public final class ThrumModel: ObservableObject {
         if v > 0.01 && !padOn[pad] {
             padOn[pad] = true
             engine.gate(pad: pad, on: true)
+            // Only when the pad actually flips — aftertouch calls this at MIDI
+            // rate and re-resolving the lanes on every message is waste.
+            pulseChanged()
         }
     }
 
@@ -394,23 +461,41 @@ public final class ThrumModel: ObservableObject {
     public func fadeAll(quick: Bool = false) {
         for i in 0..<Harmony.padCount { padOn[i] = false }
         engine.fadeAll(seconds: quick ? 1.2 : nil)
+        pulseChanged()
         show(quick ? "Letting go — 1.2 s" : "Letting go…")
     }
 
     public func panic() {
         for i in 0..<Harmony.padCount { padOn[i] = false; padLevel[i] = 0 }
         engine.panic()
+        // Panic is the emergency key: it stops the clock too.
+        pulseRunning = false
         show("Silence.")
     }
 
     // MARK: - Voicings
 
+    /// Starting points, because a good drone is a specific chord voicing and not
+    /// just "the notes of the chord". Most of these are borrowed from traditions
+    /// that have been holding drones for a very long time — what is worth
+    /// stealing from each is not its scale, which Thrum already has, but *which
+    /// intervals it leaves out and in which register it puts the rest*.
     public enum Voicing: String, CaseIterable, Identifiable {
         case openFifths = "Open Fifths"
         case fullChord = "Full Chord"
         case modalSpread = "Modal Spread"
         case tanpura = "Tanpura"
         case pedalRoot = "Pedal Root"
+        case highland = "Highland"
+        case uilleann = "Uilleann"
+        case gaida = "Gaida"
+        case aitake = "Aitake"
+        case launeddas = "Launeddas"
+        case georgian = "Georgian"
+        case didgeridoo = "Didgeridoo"
+        case hardanger = "Hardanger"
+        case gyuto = "Gyütö"
+        case guqin = "Guqin"
         public var id: String { rawValue }
 
         var detail: String {
@@ -420,6 +505,16 @@ public final class ThrumModel: ObservableObject {
             case .modalSpread: return "Chord tones low, colour tones high. Most to blow over."
             case .tanpura:     return "The classic 5–1–1–1̇ cycle, all four registers."
             case .pedalRoot:   return "One low root, one octave. The strictest tonal center."
+            case .highland:    return "Scotland — Great Highland pipes: a bass drone an octave under two tenors, and no fifth anywhere."
+            case .uilleann:    return "Ireland — three uilleann drones an octave apart, with the regulators' triad sitting on top."
+            case .gaida:       return "Bulgaria — the gaida's tonic under a second. The rub village singing is built on; turn Beating down for this one."
+            case .aitake:      return "Japan — the shō's aitake cluster from gagaku: fourths and seconds over two octaves, every pipe the same weight, nothing in the bass."
+            case .launeddas:   return "Sardinia — the triple pipe: the tumbu's low drone with a fourth and a fifth laid over it."
+            case .georgian:    return "Georgia — village polyphony over the bass: fifth, fourth and a bare seventh, and no third at all."
+            case .didgeridoo:  return "Australia — one fundamental and its own harmonic series, at harmonic-series levels. Almost all bottom."
+            case .hardanger:   return "Norway — the hardingfele's sympathetic understrings: root, second, third and fifth ringing quietly in one high register."
+            case .gyuto:       return "Tibet — Gyütö chant, with the fifth down in the lowest register where nobody else puts one."
+            case .guqin:       return "China — the qin's open strings: pentatonic, so no fourth and no seventh, spread over all four octaves."
             }
         }
     }
@@ -438,6 +533,26 @@ public final class ThrumModel: ObservableObject {
                 return ((s % 12) + 12) % 12 == want
             }
         }
+        func col(any semitones: [Int]) -> Int? {
+            for s in semitones { if let c = col(matching: s) { return c } }
+            return nil
+        }
+        /// The borrowed voicings are described in scale degrees — "a fourth over
+        /// the drone" — and not every mode has the flavour of fourth they were
+        /// built on. Take the interval when the mode has it, and otherwise the
+        /// degree that simply *sits* in that position, which is what a player
+        /// in that tradition would have reached for anyway. Never nil, so a
+        /// voicing can't quietly come out half-built.
+        func degree(_ semitones: [Int], position: Int) -> Int {
+            col(any: semitones) ?? min(position, Harmony.cols - 1)
+        }
+        let root = col(matching: 0) ?? 0
+        let second = degree([2, 1], position: 1)        // 9, else ♭9
+        let third = degree([4, 3], position: 2)         // 3, else ♭3
+        let fourth = degree([5, 6], position: 3)        // 11, else ♯11
+        let fifth = degree([7, 6, 8], position: 4)      // 5, else ♭5 or ♯5
+        let sixth = degree([9, 8], position: 5)         // 13, else ♭13
+        let seventh = degree([10, 11], position: 6)     // ♭7, else 7
 
         switch voicing {
         case .openFifths:
@@ -467,10 +582,265 @@ public final class ThrumModel: ObservableObject {
             }
         case .pedalRoot:
             if let r = col(matching: 0) { picks += [(pad(0, r), 0.95), (pad(1, r), 0.4)] }
+
+        case .highland:
+            // Two tenor drones on the chanter's low A, a bass drone an octave
+            // under them, and — the part worth stealing — no fifth at all.
+            picks += [(pad(0, root), 0.95), (pad(1, root), 0.7), (pad(2, root), 0.45)]
+
+        case .uilleann:
+            picks += [(pad(0, root), 0.9), (pad(1, root), 0.55), (pad(2, root), 0.32),
+                      (pad(2, third), 0.3), (pad(2, fifth), 0.3)]
+
+        case .gaida:
+            // Tonic and second in the same register. It beats on purpose; that
+            // interval is the whole sound.
+            picks += [(pad(0, root), 0.9), (pad(1, root), 0.5),
+                      (pad(1, second), 0.46), (pad(2, second), 0.24)]
+
+        case .aitake:
+            // Gagaku's mouth-organ cluster: six pipes at one weight, seconds
+            // and fourths, two octaves, and deliberately nothing underneath.
+            picks += [(pad(1, root), 0.5), (pad(3, root), 0.42), (pad(1, second), 0.48),
+                      (pad(2, fourth), 0.5), (pad(2, fifth), 0.48), (pad(2, seventh), 0.44)]
+
+        case .launeddas:
+            picks += [(pad(0, root), 0.95), (pad(1, fourth), 0.5),
+                      (pad(1, fifth), 0.55), (pad(2, root), 0.3)]
+
+        case .georgian:
+            picks += [(pad(0, root), 0.85), (pad(1, fifth), 0.6),
+                      (pad(2, fourth), 0.4), (pad(2, seventh), 0.34)]
+
+        case .didgeridoo:
+            // Partials 1, 2, 3, 4 at roughly 1/n, which is why it reads as one
+            // enormous note rather than as a chord.
+            picks += [(pad(0, root), 1.0), (pad(1, root), 0.4),
+                      (pad(1, fifth), 0.26), (pad(2, root), 0.2)]
+
+        case .hardanger:
+            // Understrings only: one high register, quiet, nothing holding the
+            // bottom. The resonance of an instrument nobody is playing yet.
+            picks += [(pad(2, root), 0.4), (pad(2, second), 0.32),
+                      (pad(2, third), 0.3), (pad(2, fifth), 0.36)]
+
+        case .gyuto:
+            // A fifth in the bottom octave. Every other voicing here keeps the
+            // fifth up out of the mud; this one is the mud.
+            picks += [(pad(0, root), 1.0), (pad(0, fifth), 0.5), (pad(1, root), 0.35)]
+
+        case .guqin:
+            picks += [(pad(0, root), 0.85), (pad(1, fifth), 0.5),
+                      (pad(2, second), 0.34), (pad(2, sixth), 0.3), (pad(3, root), 0.24)]
         }
 
-        for p in picks { sound(pad: p.pad, level: p.level) }
+        // Two degrees can collapse onto one pad in a mode that hasn't got both
+        // — whole tone has no perfect fourth or fifth, only the tritone sitting
+        // between them. Keep the louder ask rather than letting whichever came
+        // last quietly win.
+        var levels: [Int: Double] = [:]
+        for p in picks { levels[p.pad] = max(levels[p.pad] ?? 0, p.level) }
+        for pad in levels.keys.sorted() { sound(pad: pad, level: levels[pad]!) }
         show("\(voicing.rawValue) — \(voicing.detail)")
+    }
+
+    // MARK: - Pulse
+
+    private func pushFeel() {
+        pulse.setFeel(swing: swing, humanize: humanize, level: arpLevel)
+    }
+
+    /// Which scale degrees — grid columns — a lane draws from. Everything the
+    /// arpeggiator plays comes out of the mode and chord that are already
+    /// loaded; there is no second note pool to keep in step with the harmony.
+    private func columns(for source: ArpSource) -> [Int] {
+        switch source {
+        case .scale:
+            return Array(0..<Harmony.cols)
+        case .chord:
+            return (0..<Harmony.cols).filter { tones[$0].isChordTone }
+        case .colour:
+            return (0..<Harmony.cols).filter { !tones[$0].isChordTone }
+        case .root:
+            return (0..<Harmony.cols).filter { tones[$0].isRoot }
+        case .held:
+            // A column counts as held if any register of it is sounding, so
+            // holding one chord low arpeggiates it in whichever registers each
+            // lane is set to. Tap it in once, hear it in four octaves.
+            return (0..<Harmony.cols).filter { col in
+                (0..<Harmony.rows).contains { padOn[$0 * Harmony.cols + col] }
+            }
+        }
+    }
+
+    private func pads(for lane: ArpLane) -> [Int] {
+        let cols = columns(for: lane.source)
+        guard !cols.isEmpty else { return [] }
+        let span = lane.span
+        var out: [Int] = []
+        out.reserveCapacity(cols.count * (span.high - span.low + 1))
+        for row in span.low...span.high {
+            for col in cols { out.append(row * Harmony.cols + col) }
+        }
+        return out.sorted()
+    }
+
+    /// Re-resolve every lane and hand the result to the clock. Cheap enough to
+    /// call on any change — four lanes over thirty-two pads.
+    public func pulseChanged() {
+        var plan: [PulseCore.PlanLane] = []
+        plan.reserveCapacity(lanes.count)
+        for lane in lanes {
+            var p = PulseCore.PlanLane()
+            p.enabled = lane.enabled
+            p.pads = lane.enabled ? pads(for: lane) : []
+            p.perBeat = lane.division.perBeat
+            p.pattern = lane.pattern
+            p.level = lane.level
+            p.accentEvery = max(1, lane.accentEvery)
+            p.phase = lane.phase
+            plan.append(p)
+        }
+        pulse.update(lanes: plan)
+    }
+
+    public func togglePulse() {
+        pulseRunning.toggle()
+        if pulseRunning {
+            pulse.realign()
+            let live = lanes.filter { $0.enabled }.count
+            show("Pulse running — \(Int(tempo.rounded())) bpm, \(live) lane\(live == 1 ? "" : "s")")
+        } else {
+            show("Pulse stopped")
+        }
+    }
+
+    public func tapTempo() {
+        pulse.tap()
+    }
+
+    public func realignPulse() {
+        pulse.realign()
+        show("Lanes realigned")
+    }
+
+    public func nudgeTempo(_ delta: Double) {
+        set(.tempo, tempo + delta)
+        show("\(Int(tempo.rounded())) bpm")
+    }
+
+    public func scaleTempo(_ factor: Double) {
+        set(.tempo, tempo * factor)
+        show("\(Int(tempo.rounded())) bpm")
+    }
+
+    public func cycleSwing() {
+        let steps: [Double] = [0, 0.16, 0.3, 0.46]
+        let next = steps.first { $0 > swing + 0.01 } ?? 0
+        set(.swing, next)
+        show(next == 0 ? "Straight" : "Swing \(Int(next * 100))%")
+    }
+
+    public func cycleHumanize() {
+        let steps: [Double] = [0, 0.22, 0.5, 0.8]
+        let next = steps.first { $0 > humanize + 0.01 } ?? 0
+        set(.humanize, next)
+        show(next == 0 ? "Dead straight" : "Unsteady \(Int(next * 100))%")
+    }
+
+    // MARK: Lanes
+
+    private func mutate(lane i: Int, _ body: (inout ArpLane) -> Void) {
+        guard i >= 0, i < lanes.count else { return }
+        var l = lanes[i]
+        body(&l)
+        lanes[i] = l
+        pulsePreset = nil
+    }
+
+    public func describe(lane i: Int) -> String {
+        guard i >= 0, i < lanes.count else { return "" }
+        let l = lanes[i]
+        guard l.enabled else { return "Lane \(i + 1) off" }
+        return "Lane \(i + 1) — \(l.source.rawValue) · \(l.pattern.rawValue) · \(l.division.name) · octave \(l.span.name)"
+    }
+
+    public func toggleLane(_ i: Int) {
+        mutate(lane: i) { $0.enabled.toggle() }
+        show(describe(lane: i))
+    }
+
+    /// Picking a rate arms the lane too — one gesture on the hardware.
+    public func setLaneDivision(_ i: Int, _ d: Int) {
+        guard i >= 0, i < lanes.count else { return }
+        if lanes[i].enabled && lanes[i].divisionIndex == d {
+            mutate(lane: i) { $0.enabled = false }
+        } else {
+            mutate(lane: i) { $0.divisionIndex = d; $0.enabled = true }
+        }
+        show(lanes[i].enabled
+             ? "Lane \(i + 1) — \(Division.at(d).name) · \(Division.at(d).detail)"
+             : "Lane \(i + 1) off")
+    }
+
+    public func setLanePattern(_ i: Int, _ p: ArpPattern) {
+        mutate(lane: i) { $0.pattern = p }
+        show("Lane \(i + 1) — \(p.rawValue): \(p.detail)")
+    }
+
+    public func setLaneSource(_ i: Int, _ s: ArpSource) {
+        mutate(lane: i) { $0.source = s }
+        show("Lane \(i + 1) — \(s.rawValue): \(s.detail)")
+    }
+
+    public func setLaneSpan(_ i: Int, _ s: Int) {
+        mutate(lane: i) { $0.spanIndex = min(max(s, 0), RowSpan.all.count - 1) }
+        show("Lane \(i + 1) — octave \(lanes[i].span.name)")
+    }
+
+    public func setLaneLevel(_ i: Int, _ v: Double) {
+        mutate(lane: i) { $0.level = min(max(v, 0), 1) }
+    }
+
+    public func cycleLanePattern(_ i: Int) {
+        guard i >= 0, i < lanes.count else { return }
+        let all = ArpPattern.allCases
+        let next = all[((all.firstIndex(of: lanes[i].pattern) ?? 0) + 1) % all.count]
+        setLanePattern(i, next)
+    }
+
+    public func cycleLaneSource(_ i: Int) {
+        guard i >= 0, i < lanes.count else { return }
+        let all = ArpSource.allCases
+        let next = all[((all.firstIndex(of: lanes[i].source) ?? 0) + 1) % all.count]
+        setLaneSource(i, next)
+    }
+
+    public func cycleLaneSpan(_ i: Int) {
+        guard i >= 0, i < lanes.count else { return }
+        setLaneSpan(i, (lanes[i].spanIndex + 1) % RowSpan.all.count)
+    }
+
+    /// Shove one lane a quarter beat later. The cheapest way to turn two lanes
+    /// that are locked together into two lanes that are chasing each other.
+    public func nudgeLanePhase(_ i: Int) {
+        mutate(lane: i) { $0.phase = (($0.phase * 4).rounded() + 1).truncatingRemainder(dividingBy: 4) / 4 }
+        show("Lane \(i + 1) — offset \(Int(lanes[i].phase * 4))/4 beat")
+    }
+
+    public func allLanesOff() {
+        for i in lanes.indices { lanes[i].enabled = false }
+        pulsePreset = nil
+        show("All lanes off")
+    }
+
+    public func applyPulsePreset(_ i: Int) {
+        guard i >= 0, i < PulsePreset.all.count else { return }
+        let p = PulsePreset.all[i]
+        lanes = p.lanes
+        set(.tempo, p.bpm)
+        pulsePreset = i
+        show("\(p.name) — \(p.detail)")
     }
 
     // MARK: - Status
