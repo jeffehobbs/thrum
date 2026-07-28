@@ -163,7 +163,7 @@
   </div>
   <div class="cover-foot">
     <span>Instructions — every control, every key</span>
-    <span>Jeff Hobbs · v1.1</span>
+    <span>Jeff Hobbs · v1.2</span>
   </div>
 </section>
 
@@ -572,7 +572,7 @@
   </div>
 
   <h1>Parameters</h1>
-  <p class="lede">Twenty-six sliders in five groups. Hovering any of them shows what it does — the label fades in without moving anything — and the value on the right is live.</p>
+  <p class="lede">Twenty-eight sliders in five groups. Hovering any of them shows what it does — the label fades in without moving anything — and the value on the right is live.</p>
 
   <h3>Voice — how a tone behaves</h3>
   <table>
@@ -616,6 +616,8 @@
     <tr><td class="k">Size</td><td class="v">0.6–1.7</td><td class="n">1.15</td><td>Scales the delay-line lengths. Bigger is slower and more diffuse.</td></tr>
     <tr><td class="k">Width</td><td class="v">0–2</td><td class="n">1.25</td><td>Mid/side spread. The fundamental stays centred; harmonics open outward. 1 is untouched, 0 is mono.</td></tr>
     <tr><td class="k">Field Drift</td><td class="v">0–100%</td><td class="n">50%</td><td>A 97-second rotation of the reverb field left to right. You only notice it if you wait.</td></tr>
+    <tr><td class="k">Field Radius</td><td class="v">0.4–6 m</td><td class="n">1.6 m</td><td><em>Spatial mode only.</em> How far out the ring of tones sits. Under a metre is a helmet; past three it is a room you are standing in.</td></tr>
+    <tr><td class="k">Field Lift</td><td class="v">0–45°</td><td class="n">22°</td><td><em>Spatial mode only.</em> How far apart the low and high octave rings are pushed vertically. At zero everything sits on one ring at ear level.</td></tr>
   </table>
 
   <h3>Master</h3>
@@ -654,6 +656,58 @@
     <tr><td class="k">Cancel learn</td><td>Abandons a pending learn.</td></tr>
     <tr><td class="k">Reset map</td><td>Back to the factory layout for whichever model is attached.</td></tr>
   </table>
+</section>
+
+
+<!-- ═══════════════════════════ APP: SPATIAL ═══════════════════════════ -->
+<section class="page">
+  <div class="head">
+    <img src="ICON" alt="">
+    <div><div class="wordmark">THRUM</div><div class="tagline">drone instrument</div></div>
+    <div class="pagetag">The Mac app · 12</div>
+  </div>
+
+  <h1>Spatial</h1>
+  <p class="lede">The drone placed around your head, and kept there when you turn it. AirPods Pro or AirPods Max.</p>
+
+  <p>
+    Instead of one stereo mix, spatial mode renders <strong>sixteen mono buses</strong> positioned
+    around you and rendered binaurally. The grid already has two axes worth putting in
+    a room, so where a tone sits is a fact about the music rather than a decoration:
+    the <strong>eight columns are compass points</strong> with the tonic dead ahead, and the
+    <strong>four rows are two rings</strong> — the low two octaves slung below the ear line, the
+    high two lifted above it.
+  </p>
+  <p>
+    Which means an arpeggio walking up a column <em>climbs</em> as well as rising in pitch,
+    and a lane walking across the mode <em>orbits</em> you. Four lanes at four rates become
+    four orbits at four speeds, which is the thing the pulse was built for.
+  </p>
+
+  <h3>The controls</h3>
+  <table>
+    <tr><td class="k">Spatial <span class="v">⌥⌘S</span></td><td>In or out. Everything else in the app behaves identically either way.</td></tr>
+    <tr><td class="k">Head <span class="v">⌥⌘H</span></td><td>Reads your AirPods' orientation and counter-rotates the listener, so the drone stays where it is in the room as you turn. Asks for Motion permission the first time; declining leaves the field head-locked and nothing else changes.</td></tr>
+    <tr><td class="k">Recenter <span class="v">⌥⌘R</span></td><td>Takes wherever you are looking now as straight ahead. AirPods yaw drifts, so this is the button you will actually use — and the one to hit if the field ever feels tilted.</td></tr>
+    <tr><td class="k">Radar</td><td>Top-down view. Two rings of eight, inner is the low octaves; each dot lights with what that bus is putting out. The line from the centre is where your head is pointing, and the tick at the top is straight ahead.</td></tr>
+    <tr><td class="k">Field Radius · Lift</td><td>Under <em>Space</em> in the parameter column. How far out the rings sit, and how far apart the two octave tiers are pushed vertically.</td></tr>
+  </table>
+
+  <div class="callout">
+    <strong>Two things to get right or it will not sound like much.</strong>
+    Set <strong>macOS's own Spatial Audio to Off</strong> for your AirPods — two lots of HRTF smear
+    each other. And <strong>turn Wet down</strong>: the reverb tail deliberately bypasses the
+    spatial stage, because a thirty-second diffuse tail has no location to be placed
+    at, so it stays a stereo bed and does not rotate with your head. The more of it
+    you have, the less the field localizes.
+  </div>
+
+  <h3>What it costs</h3>
+  <p>
+    Almost nothing. The sixteen HRTF instances add about <strong>0.2% of one core</strong> on top of
+    the engine, measured with the app's own graph. Spatial mode is not the thing to
+    switch off if you are chasing a dropout.
+  </p>
 </section>
 
 <!-- ═══════════════════════════ SITAR ═══════════════════════════ -->
@@ -1026,6 +1080,9 @@
     <tr><td class="k">Pulse is running but silent</td><td>Every lane defaults to the <strong>Held</strong> source, so it needs tones held to arpeggiate. Either tap a chord in, or switch a lane to <strong>Chord</strong> or <strong>Scale</strong>, which draw from the mode whether or not anything is sounding.</td></tr>
     <tr><td class="k">Arpeggio sounds mechanical</td><td>Raise <strong>Unsteady</strong>, and give two lanes rates that don't divide into each other — ×1 with ×1½ rather than ×1 with ×2. Equal rates lock; unequal ones drift.</td></tr>
     <tr><td class="k">Arpeggio buries the drone</td><td>Lower <strong>Accent</strong>, or lengthen <strong>Ring</strong> so the notes overlap into the chord instead of standing out of it.</td></tr>
+    <tr><td class="k">Spatial sounds like ordinary stereo</td><td>Almost always macOS's own Spatial Audio also being on for the AirPods — set it to Off. Failing that, <strong>Wet</strong> is high enough that the un-spatialized reverb bed is drowning the field; bring it down.</td></tr>
+    <tr><td class="k">The field turns the wrong way</td><td>Hit <strong>Recenter</strong> facing forward. If a tone still <em>follows</em> your head instead of staying put, that is a genuine bug rather than a setting — the sign convention is measured in <code>Tools/axis</code>.</td></tr>
+    <tr><td class="k">Head tracking never starts</td><td>Only AirPods Pro and AirPods Max report orientation. If it was denied, Thrum appears under Privacy &amp; Security → Motion &amp; Fitness.</td></tr>
     <tr><td class="k">Everything sounds still</td><td>Beating, Drift or Motion is at zero. Those three are what keep it alive.</td></tr>
     <tr><td class="k">Tiring after a while</td><td>Raise <strong>Presence Cut</strong>. Energy around 2–5 kHz is what wears the ear out over twenty minutes.</td></tr>
   </table>

@@ -18,6 +18,8 @@ public enum Param: Int, CaseIterable, Identifiable, Sendable {
     case globalSwell, masterVolume
     // Pulse — appended, so a saved Launch Control map keeps its numbering.
     case tempo, pluckAttack, pluckDecay, arpLevel, swing, humanize
+    // Spatial — likewise appended.
+    case fieldRadius, fieldLift
 
     public var id: Int { rawValue }
 }
@@ -64,6 +66,8 @@ public struct ParamSpec {
         if unit == "s" { return String(format: v < 10 ? "%.1f s" : "%.0f s", v) }
         if unit == "ms" { return String(format: "%.0f ms", v * 1000) }
         if unit == "bpm" { return String(format: "%.0f bpm", v) }
+        if unit == "m" { return String(format: "%.1f m", v) }
+        if unit == "°" { return String(format: "%.0f°", v) }
         if unit == "%" { return "\(Int((v * 100).rounded()))%" }
         return String(format: "%.2f", v)
     }
@@ -110,6 +114,38 @@ public final class ThrumModel: ObservableObject {
     @Published public var humanize: Double = 0.22 { didSet { pushFeel() } }
     /// Last preset applied, so the Launchpad can light it.
     @Published public var pulsePreset: Int? = nil
+
+    // MARK: Spatial
+
+    /// AirPods head orientation. Owned here so the UI and the audio host see
+    /// the same object.
+    public let head = HeadTracker()
+
+    /// Set by the host; flips the engine between the stereo and spatial chains
+    /// and builds the spatial graph on first use.
+    public var onSpatialChange: ((Bool) -> Void)?
+    /// Set by the host; re-reads `field` and pushes it onto the nodes.
+    public var onFieldChange: (() -> Void)?
+
+    @Published public var spatialEnabled = false {
+        didSet {
+            guard spatialEnabled != oldValue else { return }
+            onSpatialChange?(spatialEnabled)
+            if spatialEnabled {
+                show("Spatial field on — sixteen positions around you. Turn macOS's own Spatial Audio off for AirPods.")
+            } else {
+                head.stop()
+                show("Back to stereo")
+            }
+        }
+    }
+    @Published public var field = SpatialField() { didSet { onFieldChange?() } }
+    @Published public var headTracking = false {
+        didSet {
+            guard headTracking != oldValue else { return }
+            if headTracking { head.start() } else { head.stop() }
+        }
+    }
 
     /// True when no voice is sounding *and* none is still fading. Drives the
     /// on-screen animation, which otherwise redraws a canvas twenty times a
@@ -255,6 +291,14 @@ public final class ThrumModel: ObservableObject {
                   detail: "A 97-second rotation of the reverb field. You notice it only if you wait.",
                   exponential: false,
                   get: { Double($0.engine.spatialDrift) }, set: { $0.engine.spatialDrift = Float($1) }),
+        ParamSpec(param: .fieldRadius, name: "Field Radius", group: .space, range: 0.4...6, unit: "m",
+                  detail: "Spatial mode only. How far out the ring of tones sits. Under a metre is a helmet; past three it is a room you're standing in.",
+                  exponential: true,
+                  get: { $0.field.radius }, set: { $0.field.radius = $1 }),
+        ParamSpec(param: .fieldLift, name: "Field Lift", group: .space, range: 0...45, unit: "°",
+                  detail: "Spatial mode only. How far apart the low and high octave rings are pushed vertically. At zero everything sits on one ring at ear level.",
+                  exponential: false,
+                  get: { $0.field.lift }, set: { $0.field.lift = $1 }),
     ]
 
     private static let masterSpecs: [ParamSpec] = [

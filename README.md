@@ -8,14 +8,16 @@ under your fingers. Any tone can be given a jawari buzz for a sitar edge.
 The point is to make something a horn player or a guitarist can improvise over
 for twenty minutes without it going anywhere or getting tiring.
 
-There is also a **pulse**: a tapped tempo and four arpeggiators that work the
-chord you are already holding, at four different rates at once.
+There is also a **pulse** — a tapped tempo and four arpeggiators that work the
+chord you are already holding, at four different rates at once — and a
+**spatial** mode that places every tone around your head and keeps it there when
+you turn, on AirPods Pro or AirPods Max.
 
 `instructions.pdf` is the manual.
 
 ## Install
 
-Grab `Thrum-1.1.zip` from the [latest
+Grab `Thrum-1.2.zip` from the [latest
 release](https://github.com/jeffehobbs/thrum/releases/latest), unzip it and drag
 `Thrum.app` to `/Applications`. It's signed and notarized, so it opens without
 any Gatekeeper detour. macOS 14+, Apple silicon or Intel.
@@ -44,12 +46,17 @@ correctly-built app that still called itself 1.0. `build.sh` takes the release
 filename from the *bundle*, so check `dist/Thrum-<ver>.zip` is the version you
 meant before shipping.
 
-Thrum is signed with the hardened runtime and no entitlements, because it needs
-none — it opens CoreMIDI endpoints and an audio output unit, neither of which is
-a restricted resource, and its only persisted state is a `UserDefaults`
-dictionary. It is deliberately not sandboxed: the sandbox buys nothing for
-Developer ID distribution here and gets in the way of talking to a
-class-compliant USB controller.
+Thrum is signed with the hardened runtime and no entitlements. CoreMIDI
+endpoints and an audio output unit are not restricted resources, and its only
+persisted state is a `UserDefaults` dictionary. It is deliberately not sandboxed:
+the sandbox buys nothing for Developer ID distribution here and gets in the way
+of talking to a class-compliant USB controller.
+
+The one thing it can be *denied* is head tracking, which reads AirPods
+orientation through CoreMotion and so carries an `NSMotionUsageDescription` and
+raises a Motion & Fitness prompt the first time you turn it on. Everything
+degrades to a head-locked field if you say no; nothing else in the app asks for
+anything.
 
 > **Never listen to a Debug build.** The engine is ~40× slower under `-Onone`:
 > 2× realtime with six voices (48% of a core) and *0.4×* with a full grid, so it
@@ -342,6 +349,59 @@ the chord mid-figure and the lane keeps its place in the bar.
 
 ---
 
+## Spatial — the drone around you
+
+Sixteen mono buses placed around your head and rendered binaurally, instead of
+one stereo mix. `⌥⌘S` toggles it.
+
+The grid already has two axes worth putting in a room, so the mapping is a fact
+about the music rather than a decoration: the **eight columns are compass
+points** with the tonic dead ahead, and the **four rows are two rings** — the low
+two octaves slung below the ear line, the high two lifted above it. An arpeggio
+walking up a column therefore climbs as well as rises in pitch, and a lane
+walking across the mode orbits you. Four lanes at four rates become four orbits
+at four speeds.
+
+**Head tracking** (`⌥⌘H`) reads AirPods orientation and counter-rotates the
+listener, so the drone stays where it is in the room when you turn your head.
+**Recenter** (`⌥⌘R`) takes wherever you are looking as straight ahead — AirPods
+yaw drifts, so this is the button you will actually use.
+
+Two things to get right or it won't sound like anything:
+
+- **Turn macOS's own Spatial Audio off** for the AirPods. Two lots of HRTF smear
+  each other.
+- **Turn Wet down.** The reverb tail deliberately bypasses the spatial stage — a
+  thirty-second diffuse tail has no location to be placed at — so it stays a
+  stereo bed and does not rotate with your head. The more of it you have, the
+  less the field localizes.
+
+### How it is put together
+
+`DroneEngine` gets a second master chain. Voices still sum to stereo, because
+that is what feeds the reverb, but each voice *also* writes mono into its own
+bus, and each bus gets its own EQ and saturation before being handed to
+`AVAudioEnvironmentNode` with a position. The wet tail is extracted by
+subtraction — Cathedral is additive, so processed-minus-send is exactly the tail,
+with no change to the reverb.
+
+There is **one limiter for the whole field**, detected on the mono sum and applied
+equally to every bus. A per-bus limiter would pump the image sideways every time
+one compass point got loud. The ceiling is a smooth `tanh(x)/x` ratio rather than
+a clamp, for the reason in the code comment.
+
+Seventeen source nodes mean seventeen render callbacks per cycle, but the engine
+must render once: the first callback to see a new `mSampleTime` does the work and
+the rest copy their slice. Nominating a "leader" node would be wrong — callback
+order between mixer inputs is not guaranteed.
+
+Costs, measured (`Tools/spatial`): the engine's spatial chain runs at ~18×
+realtime with a full grid and jawari on everything, and the sixteen HRTF
+instances add about **0.2% of one core** on top. That number is why the graph is
+built up front rather than lazily — see below.
+
+---
+
 ## Testing
 
 `Tools/main.swift` renders the real engine offline to a WAV and reports whether
@@ -394,6 +454,40 @@ accent**, and compares. The drone's tremolo and filter sweep move its level
 around on prime periods, so a bare before/after measurement drifts by 40% on its
 own and will happily report a bug that isn't there.
 
+`Tools/spatial/` is the spatial harness. It checks that each pad lands on exactly
+its own bus; that the wet bed is silent at Wet=0 and that the dry is unaffected by
+the reverb setting; that limiting is *uniform*, by running the same field twice at
+different levels and confirming the ratio between two buses survives; and — via a
+manual-rendering `AVAudioEngine` carrying the app's real graph — what the
+**post-HRTF** output actually peaks at, which is the only measurement that can
+answer "does it clip".
+
+```sh
+swiftc -O -o /tmp/thrumspatial \
+  Shared/{Tuning,Harmony,Timbre,Events,Cathedral,DroneEngine,Spatial}.swift \
+  Tools/spatial/{ablholder,binaural,main}.swift
+/tmp/thrumspatial
+```
+
+`Tools/axis/` measures `AVAudioEnvironmentNode`'s sign conventions by asking which
+ear a single source lands in. Do not derive these by hand: positive listener yaw
+turns the listener *clockwise*, the opposite handedness from CoreMotion, and
+getting it wrong makes head tracking swing the wrong way while still looking
+correct in the readout.
+
+Two lessons from this suite that cost real time:
+
+- **A test can pass for the wrong reason.** The first crackle detector scored a
+  known-bad limiter and a good one identically, because the material's own second
+  difference was ~0.5 of peak and swamped what it was looking for — and because it
+  measured the first sample of each window against zeroed history. Always A/B a
+  detector against the bug it claims to catch.
+- **Measure before optimising.** The spatial graph was originally built lazily to
+  avoid sixteen idle HRTFs, which turned out to cost 0.2% of a core — while the
+  lazy build attached seventeen nodes to a *running* engine on every first toggle,
+  which is exactly the kind of live reconfiguration that glitches the render
+  thread. It is built up front now.
+
 `Tools/icon/` draws the app icon. `Tools/click/` posts real CGEvent clicks —
 System Events' `click at` routes through accessibility and never reaches
 SwiftUI gestures. `Tools/midilist/` and `Tools/midimon/` check what CoreMIDI
@@ -405,9 +499,9 @@ the manual's page breaks get checked.
 
 ## The manual
 
-`instructions.pdf` — 20 pages covering every control in the app and every key on
-the Launchpad, plus the pulse, all fifteen voicings, the jawari explained in
-detail and a troubleshooting page. Rebuild it after changing any control:
+`instructions.pdf` — 21 pages covering every control in the app and every key on
+the Launchpad, plus the pulse, the spatial field, all fifteen voicings, the jawari
+explained in detail and a troubleshooting page. Rebuild it after changing any control:
 
 ```sh
 ./Tools/manual/build-manual.sh      # renders Tools/manual/manual.html via headless Chrome
@@ -434,6 +528,7 @@ Shared/   Tuning       temperaments and pitch-class tables
           DroneEngine  voices, partials, modulation, master chain
           Cathedral    the FDN reverb
           Pulse        tempo, tap tempo, the four arpeggiator lanes
+          Spatial      the ring geometry, and AirPods head tracking
           ThrumModel   instrument state; the only writer to the engine
 App/      ThrumApp     AVAudioEngine host
           ThrumView    the interface

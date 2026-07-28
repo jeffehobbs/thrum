@@ -19,6 +19,12 @@ import AVFoundation
 /// same state every 2,747 seconds; two such voices, effectively never.
 public final class DroneEngine {
     public static let voiceCount = Harmony.padCount   // 32
+    /// Spatial mode renders sixteen mono sub-mixes instead of one stereo mix:
+    /// eight compass points around the listener, each in a low and a high tier.
+    /// `AVAudioEnvironmentNode` only spatializes mono inputs, so a bus is the
+    /// smallest thing that can have a position — and thirty-two HRTF instances
+    /// is more than the budget allows.
+    public static let spatialBusCount = 16
     private static let maxPartials = TimbreCatalog.maxPartials
     private static let maxFrames = 8192
     private static let controlChunk = 64
@@ -82,6 +88,9 @@ public final class DroneEngine {
     /// Time for an accent to fall away to silence, in seconds. Long enough to
     /// overlap the next one is where it stops sounding like a sequencer.
     public var pluckDecay: Double = 1.4
+    /// When set, `renderSpatial` fills the sixteen mono buses and the wet
+    /// stereo bed instead of a single stereo mix. Read once per block.
+    public var spatialEnabled = false
 
     // MARK: - Metering (render thread writes, UI reads; benign race on Floats)
 
@@ -171,6 +180,27 @@ public final class DroneEngine {
     private let scratchL: UnsafeMutablePointer<Float>
     private let scratchR: UnsafeMutablePointer<Float>
 
+    // MARK: Spatial buffers (only touched when spatialEnabled)
+
+    /// spatialBusCount × maxFrames of mono dry, one contiguous block per bus.
+    private let busBuf: UnsafeMutablePointer<Float>
+    /// The stereo voice sum, which is what feeds the reverb in spatial mode.
+    private let sendL: UnsafeMutablePointer<Float>
+    private let sendR: UnsafeMutablePointer<Float>
+    /// Wet-only tail. Cathedral is additive, so this is the processed send
+    /// minus the send, which is exact and needs no change to the reverb.
+    private let wetL: UnsafeMutablePointer<Float>
+    private let wetR: UnsafeMutablePointer<Float>
+    /// Mono sum of everything, used only to drive the limiter, and the
+    /// resulting per-sample gain — applied equally to every bus so that
+    /// limiting can't move the image around.
+    private let sumBuf: UnsafeMutablePointer<Float>
+    private let gainBuf: UnsafeMutablePointer<Float>
+    /// Three biquads per bus. A raw buffer rather than an array of arrays:
+    /// nothing on the render thread may touch Swift collections.
+    private let busEQ: UnsafeMutablePointer<Biquad>
+    private var spatialFramesReady = 0
+
     private var sampleRate = 44100.0
     private var timeSamples: Double = 0
 
@@ -228,6 +258,16 @@ public final class DroneEngine {
         scratchL = fbuf(Self.maxFrames)
         scratchR = fbuf(Self.maxFrames)
         meters = fbuf(vc + 1)
+
+        busBuf = fbuf(Self.spatialBusCount * Self.maxFrames)
+        sendL = fbuf(Self.maxFrames)
+        sendR = fbuf(Self.maxFrames)
+        wetL = fbuf(Self.maxFrames)
+        wetR = fbuf(Self.maxFrames)
+        sumBuf = fbuf(Self.maxFrames)
+        gainBuf = fbuf(Self.maxFrames)
+        busEQ = UnsafeMutablePointer<Biquad>.allocate(capacity: Self.spatialBusCount * 3)
+        busEQ.initialize(repeating: Biquad(), count: Self.spatialBusCount * 3)
 
         // Flatten the timbre catalog.
         let catalog = TimbreCatalog.all
@@ -297,6 +337,11 @@ public final class DroneEngine {
         apState.deallocate(); combBuf.deallocate()
         scratchL.deallocate(); scratchR.deallocate()
         meters.deallocate()
+        busBuf.deallocate()
+        sendL.deallocate(); sendR.deallocate()
+        wetL.deallocate(); wetR.deallocate()
+        sumBuf.deallocate(); gainBuf.deallocate()
+        busEQ.deallocate()
         tbRatio.deallocate(); tbAmp.deallocate(); tbPartials.deallocate()
         tbCutoff.deallocate(); tbBeat.deallocate()
         tbSitarBias.deallocate(); tbSwell.deallocate()
@@ -452,9 +497,12 @@ public final class DroneEngine {
             for i in 0..<n { chL[i] = (chL[i] + outR[i]) * 0.5 }
         }
         timeSamples += Double(n)
+        accountForRender(n, since: startTicks)
+    }
 
-        // How much of the deadline did that take? mach_absolute_time is safe
-        // to call from a render thread.
+    /// How much of the deadline did that take? `mach_absolute_time` is safe to
+    /// call from a render thread.
+    private func accountForRender(_ n: Int, since startTicks: UInt64) {
         let elapsedNs = Double(mach_absolute_time() - startTicks) * timebaseScale
         let budgetNs = Double(n) / sampleRate * 1e9
         if budgetNs > 0 {
@@ -501,8 +549,15 @@ public final class DroneEngine {
         let cutoffBase = 320.0 * pow(28.0, Double(min(max(brightness, 0), 1))) * tbCutoff[ti]
         let nyquistish = sr * 0.46
 
+        // In spatial mode a voice writes twice: mono into its own bus, which is
+        // what gets a position, and stereo into the send, which is what feeds
+        // the reverb. Keeping the send identical to the normal path is why the
+        // tail sounds the same in both modes.
+        let spatial = spatialEnabled
+
         for v in 0..<Self.voiceCount where voices[v].active {
             var vc = voices[v]
+            let busOut = spatial ? busBuf + Self.bus(pad: v) * Self.maxFrames : nil
             let releaseTau = max(0.05, fadeSeconds * Double(vc.releaseScale) / 3.0)
             let releaseCoef = 1.0 - Float(exp(-1.0 / (releaseTau * sr)))
 
@@ -666,6 +721,7 @@ public final class DroneEngine {
                     let g = vc.env + vc.pluck * (1.0 - 0.6 * vc.env)
                     chL[idx] += oL * g
                     chR[idx] += oR * g
+                    if let busOut { busOut[idx] += (oL + oR) * 0.5 * g }
                 }
 
                 // Peak-with-slow-release, updated once a control chunk. Falls
@@ -693,22 +749,186 @@ public final class DroneEngine {
         }
     }
 
+    // MARK: - Spatial
+
+    /// Which bus a pad belongs to: its column picks the compass point, and its
+    /// octave picks the low or the high tier. An arpeggio walking up a column
+    /// therefore rises overhead as well as in pitch.
+    public static func bus(pad: Int) -> Int {
+        let row = pad / Harmony.cols
+        let col = pad % Harmony.cols
+        return (row < Harmony.rows / 2 ? 0 : 8) + col
+    }
+
+    /// Renders one block into the sixteen mono buses plus the wet stereo bed.
+    /// The host drives this once per cycle and then copies each bus out; see
+    /// `copyBus`.
+    public func renderSpatial(frameCount: Int) {
+        let n = min(frameCount, Self.maxFrames)
+        let startTicks = mach_absolute_time()
+        events.drain { handle($0) }
+
+        for b in 0..<Self.spatialBusCount {
+            let p = busBuf + b * Self.maxFrames
+            for i in 0..<n { p[i] = 0 }
+        }
+        for i in 0..<n { sendL[i] = 0; sendR[i] = 0 }
+
+        renderVoices(n, sendL, sendR)
+        renderSpatialMaster(n)
+        spatialFramesReady = n
+        timeSamples += Double(n)
+        accountForRender(n, since: startTicks)
+    }
+
+    /// Copy one bus's mono block out. Safe to call only after `renderSpatial`
+    /// for the same cycle.
+    public func copyBus(_ index: Int, _ frameCount: Int, into out: UnsafeMutablePointer<Float>) {
+        let n = min(frameCount, spatialFramesReady)
+        guard index >= 0, index < Self.spatialBusCount else {
+            for i in 0..<frameCount { out[i] = 0 }
+            return
+        }
+        let p = busBuf + index * Self.maxFrames
+        for i in 0..<n { out[i] = p[i] }
+        if n < frameCount { for i in n..<frameCount { out[i] = 0 } }
+    }
+
+    /// The diffuse tail, which stays a stereo bed rather than being placed —
+    /// a thirty-second reverb has no location, and sixteen of them would not
+    /// fit in the budget anyway.
+    public func copyWet(_ frameCount: Int, _ l: UnsafeMutablePointer<Float>, _ r: UnsafeMutablePointer<Float>) {
+        let n = min(frameCount, spatialFramesReady)
+        for i in 0..<n { l[i] = wetL[i]; r[i] = wetR[i] }
+        if n < frameCount { for i in n..<frameCount { l[i] = 0; r[i] = 0 } }
+    }
+
+    private func renderSpatialMaster(_ n: Int) {
+        let sr = sampleRate
+        refreshEQ(sr)
+
+        // Block-rate smoothing in spatial mode: these are shared across
+        // seventeen output paths, so advancing them per sample per path would
+        // move them seventeen times too fast.
+        let driveTarget = min(max(drive, 0), 1)
+        let volTarget = min(max(masterVolume, 0), 1)
+        let swellTarget = min(max(globalSwell, 0), 1)
+        let step = Float(n)
+        driveSmoothed += (driveTarget - driveSmoothed) * min(1, 0.0008 * step)
+        volumeSmoothed += (volTarget - volumeSmoothed) * min(1, 0.0008 * step)
+        swellSmoothed += (swellTarget - swellSmoothed) * min(1, 0.0015 * step)
+
+        let pre = 1.0 + driveSmoothed * driveSmoothed * 5.0
+        let makeup = 1.0 / (1.0 + driveSmoothed * 0.75)
+        let driven = driveSmoothed > 0.001
+
+        // Dry: the same spectral shape as always, per bus, in mono.
+        for b in 0..<Self.spatialBusCount {
+            let p = busBuf + b * Self.maxFrames
+            var lo = busEQ[b * 3], dip = busEQ[b * 3 + 1], hi = busEQ[b * 3 + 2]
+            for i in 0..<n {
+                var x = hi.process(dip.process(lo.process(p[i])))
+                if driven { x = tanhf(x * pre) * makeup }
+                p[i] = x
+            }
+            busEQ[b * 3] = lo; busEQ[b * 3 + 1] = dip; busEQ[b * 3 + 2] = hi
+        }
+
+        // Send: identical chain, in stereo, feeding the reverb.
+        for i in 0..<n {
+            var l = shelfHiL.process(dipL.process(shelfLoL.process(sendL[i])))
+            var r = shelfHiR.process(dipR.process(shelfLoR.process(sendR[i])))
+            if driven {
+                l = tanhf(l * pre) * makeup
+                r = tanhf(r * pre) * makeup
+            }
+            sendL[i] = l; sendR[i] = r
+            wetL[i] = l; wetR[i] = r
+        }
+
+        cathedral.process(n, wetL, wetR,
+                          decay: reverbDecay, damp: reverbDamp, size: reverbSize,
+                          mix: reverbMix, rotate: spatialDrift,
+                          time: timeSamples / sr)
+        // Cathedral adds its tail to what it was given, so subtracting the send
+        // back off leaves the tail alone, already scaled by Wet.
+        for i in 0..<n { wetL[i] -= sendL[i]; wetR[i] -= sendR[i] }
+
+        // One limiter for the whole field, detected on the mono sum and applied
+        // equally everywhere — a per-bus limiter would pump the image sideways
+        // every time one compass point got loud.
+        for i in 0..<n { sumBuf[i] = wetL[i] + wetR[i] }
+        for b in 0..<Self.spatialBusCount {
+            let p = busBuf + b * Self.maxFrames
+            for i in 0..<n { sumBuf[i] += p[i] }
+        }
+
+        let limAtk = 1.0 - Float(exp(-1.0 / (0.004 * sr)))
+        let limRel = 1.0 - Float(exp(-1.0 / (0.35 * sr)))
+        let g = volumeSmoothed * swellSmoothed
+        var peak: Float = 0
+        for i in 0..<n {
+            let mag = abs(sumBuf[i] * g)
+            limiterEnv += (mag - limiterEnv) * (mag > limiterEnv ? limAtk : limRel)
+            // Threshold sits lower than the stereo path's 0.88 on purpose: the
+            // detector only sees the mono sum, and the HRTF downstream can come
+            // back a couple of dB hotter than that.
+            let want: Float = limiterEnv > 0.72 ? 0.72 / limiterEnv : 1
+            limiterGain += (want - limiterGain) * (want < limiterGain ? limAtk : limRel)
+
+            // The stereo path ends in tanhf, which mops up whatever slips
+            // through the limiter's 4 ms attack. Spatial mode has no such stage,
+            // because the HRTF happens downstream and outside this engine — so
+            // the ceiling has to be enforced here.
+            //
+            // It has to be enforced *smoothly*. An earlier version of this took
+            // min(gain, ceiling/|sum|), which is a hard switch: the gain jumps
+            // the instant the signal crosses the threshold and jumps back after,
+            // once per peak, and a per-sample gain discontinuity is audible as
+            // faint crackle on loud material. Expressing the same soft clip as a
+            // *ratio* — tanh(x)/x — gives the identical curve to the stereo
+            // path's final stage, but as a gain that varies smoothly with the
+            // signal. Applied equally to every bus, so it still can't shove the
+            // field sideways.
+            let x = sumBuf[i] * g * limiterGain
+            let shaped = tanhf(x)
+            let ratio = abs(x) > 1e-6 ? shaped / x : 1
+            gainBuf[i] = g * limiterGain * ratio
+            let out = abs(shaped)
+            if out > peak { peak = out }
+        }
+        for b in 0..<Self.spatialBusCount {
+            let p = busBuf + b * Self.maxFrames
+            for i in 0..<n { p[i] *= gainBuf[i] }
+        }
+        for i in 0..<n { wetL[i] *= gainBuf[i]; wetR[i] *= gainBuf[i] }
+        meters[Self.voiceCount] = peak
+    }
+
     // MARK: - Master chain
+
+    /// Spectral balance: warm bottom, restrained 2–5 kHz, soft air on top.
+    /// Shared by both modes; spatial also has to re-coefficient every bus.
+    private func refreshEQ(_ sr: Double) {
+        guard eqDirty || warmth != lastWarmth || presenceCut != lastPresence || air != lastAir else { return }
+        let w = Double(min(max(warmth, 0), 1))
+        let p = Double(min(max(presenceCut, 0), 1))
+        let a = Double(min(max(air, 0), 1))
+        shelfLoL.lowShelf(165, -1.0 + w * 8.0, sr); shelfLoR.lowShelf(165, -1.0 + w * 8.0, sr)
+        dipL.peaking(3200, -p * 7.0, 0.9, sr);      dipR.peaking(3200, -p * 7.0, 0.9, sr)
+        shelfHiL.highShelf(9000, -3.0 + a * 8.0, sr); shelfHiR.highShelf(9000, -3.0 + a * 8.0, sr)
+        for b in 0..<Self.spatialBusCount {
+            busEQ[b * 3].lowShelf(165, -1.0 + w * 8.0, sr)
+            busEQ[b * 3 + 1].peaking(3200, -p * 7.0, 0.9, sr)
+            busEQ[b * 3 + 2].highShelf(9000, -3.0 + a * 8.0, sr)
+        }
+        lastWarmth = warmth; lastPresence = presenceCut; lastAir = air
+        eqDirty = false
+    }
 
     private func renderMaster(_ n: Int, _ chL: UnsafeMutablePointer<Float>, _ chR: UnsafeMutablePointer<Float>) {
         let sr = sampleRate
-
-        // Spectral balance: warm bottom, restrained 2–5 kHz, soft air on top.
-        if eqDirty || warmth != lastWarmth || presenceCut != lastPresence || air != lastAir {
-            let w = Double(min(max(warmth, 0), 1))
-            let p = Double(min(max(presenceCut, 0), 1))
-            let a = Double(min(max(air, 0), 1))
-            shelfLoL.lowShelf(165, -1.0 + w * 8.0, sr); shelfLoR.lowShelf(165, -1.0 + w * 8.0, sr)
-            dipL.peaking(3200, -p * 7.0, 0.9, sr);      dipR.peaking(3200, -p * 7.0, 0.9, sr)
-            shelfHiL.highShelf(9000, -3.0 + a * 8.0, sr); shelfHiR.highShelf(9000, -3.0 + a * 8.0, sr)
-            lastWarmth = warmth; lastPresence = presenceCut; lastAir = air
-            eqDirty = false
-        }
+        refreshEQ(sr)
 
         let driveTarget = min(max(drive, 0), 1)
         let widthTarget = min(max(width, 0), 2)

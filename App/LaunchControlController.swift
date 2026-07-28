@@ -41,6 +41,7 @@ final class LaunchControlController: ObservableObject {
         .brightness, .warmth, .presence, .air, .drive, .width, .spatialDrift, .masterVolume,
         .reverbDecay, .reverbMix, .reverbDamp, .reverbSize,
         .tempo, .pluckAttack, .pluckDecay, .arpLevel, .swing, .humanize,
+        .fieldRadius, .fieldLift,
     ]
 
     init(model: ThrumModel) {

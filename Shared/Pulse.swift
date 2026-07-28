@@ -302,7 +302,13 @@ public final class PulseCore: @unchecked Sendable {
     }
 
     private let engine: DroneEngine
-    private let queue = DispatchQueue(label: "space.thrum.pulse", qos: .userInteractive)
+    /// `.userInitiated`, not `.userInteractive`. The clock only has to be
+    /// accurate to a few milliseconds — plucks have a 35 ms attack and the engine
+    /// picks events up on block boundaries anyway — whereas `.userInteractive` is
+    /// the top non-realtime band and puts a 250 Hz timer in direct competition
+    /// with the audio render thread. Losing a millisecond of clock precision is
+    /// free; losing a render deadline is a click.
+    private let queue = DispatchQueue(label: "space.thrum.pulse", qos: .userInitiated)
     private var timer: DispatchSourceTimer?
 
     // Everything below is confined to `queue`.
@@ -425,7 +431,9 @@ public final class PulseCore: @unchecked Sendable {
     private func startTimer() {
         stopTimer()
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .milliseconds(1))
+        // 8 ms rather than 4: half the wakeups, and still far finer than the
+        // ~11 ms audio block the events land on.
+        t.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .milliseconds(2))
         t.setEventHandler { [weak self] in self?.tick() }
         timer = t
         t.resume()

@@ -215,6 +215,8 @@ struct ThrumView: View {
 
             PulsePanel(model: model)
 
+            SpatialPanel(model: model)
+
             Panel(title: "Voicings") {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
                     ForEach(ThrumModel.Voicing.allCases) { v in
@@ -660,6 +662,147 @@ private struct BeatDots: View {
                         .frame(width: 6, height: 6)
                 }
             }
+        }
+    }
+}
+
+// MARK: - Spatial
+
+/// The field, and where your head is pointing in it.
+private struct SpatialPanel: View {
+    @ObservedObject var model: ThrumModel
+    @ObservedObject var head: HeadTracker
+
+    init(model: ThrumModel) {
+        self.model = model
+        self.head = model.head
+    }
+
+    var body: some View {
+        Panel(title: "Spatial — the drone around you") {
+            HStack(alignment: .top, spacing: 12) {
+                FieldRadar(model: model)
+                    .frame(width: 116, height: 116)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 6) {
+                        Button { model.spatialEnabled.toggle() } label: {
+                            Label(model.spatialEnabled ? "Spatial" : "Stereo",
+                                  systemImage: model.spatialEnabled ? "circle.hexagongrid.fill" : "speaker.wave.2")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .frame(width: 94, height: 28)
+                        }
+                        .buttonStyle(Chip(active: model.spatialEnabled, hue: 0.55))
+                        .help("Sixteen mono buses placed around you and rendered binaurally, instead of one stereo mix.")
+
+                        Button { model.headTracking.toggle() } label: {
+                            Label("Head", systemImage: "airpodspro")
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .frame(width: 76, height: 28)
+                        }
+                        .buttonStyle(Chip(active: model.headTracking, hue: 0.36))
+                        .disabled(!model.spatialEnabled || head.status == .unsupported)
+                        .help(head.status.blurb)
+
+                        Button { model.head.recenter() } label: {
+                            Label("Recenter", systemImage: "scope")
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .frame(width: 92, height: 28)
+                        }
+                        .buttonStyle(Chip(active: false))
+                        .disabled(!model.headTracking)
+                        .help("Takes where you are looking now as straight ahead. AirPods yaw drifts, so this is the button you'll actually use.")
+                    }
+
+                    if model.headTracking && head.status == .tracking {
+                        Text(String(format: "yaw %+.0f°   pitch %+.0f°   roll %+.0f°",
+                                    head.yaw, head.pitch, head.roll))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Ink.amber.opacity(0.9))
+                    } else {
+                        Text(head.status.blurb)
+                            .font(.system(size: 9.5, design: .rounded))
+                            .foregroundStyle(head.status == .denied ? Color.red.opacity(0.85) : Ink.faint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Text(model.spatialEnabled
+                         ? "Columns are compass points with the tonic ahead of you; the low two octaves ring below the ear line and the high two above it. Field Radius and Field Lift are under Space."
+                         : "Off. Every tone is placed by its degree and its octave, so an arpeggio walking up a column climbs and a lane walking across the mode orbits.")
+                        .font(.system(size: 9.5, design: .rounded))
+                        .foregroundStyle(Ink.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if model.spatialEnabled {
+                        Text("Set macOS's own Spatial Audio to Off for your AirPods — two lots of HRTF smears it.")
+                            .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(Ink.amber.opacity(0.8))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Top-down view of the field. Two rings of eight: the inner ring is the low
+/// octaves, the outer the high ones, each dot lit by what that bus is actually
+/// putting out. Ahead is up.
+private struct FieldRadar: View {
+    @ObservedObject var model: ThrumModel
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: model.isIdle)) { _ in
+            Canvas { ctx, size in
+                let c = CGPoint(x: size.width / 2, y: size.height / 2)
+                let outer = min(size.width, size.height) / 2 - 8
+                let inner = outer * 0.58
+                let hue = model.harmony.mode.hue
+
+                for r in [inner, outer] {
+                    ctx.stroke(Circle().path(in: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)),
+                               with: .color(Ink.panelEdge), lineWidth: 1)
+                }
+                // A tick where the listener faces.
+                ctx.stroke(Path { p in
+                    p.move(to: CGPoint(x: c.x, y: c.y - outer - 6))
+                    p.addLine(to: CGPoint(x: c.x, y: c.y - outer - 1))
+                }, with: .color(Ink.amber.opacity(0.8)), lineWidth: 1.5)
+
+                // Sum each bus's pads straight off the engine meters.
+                var level = [Double](repeating: 0, count: DroneEngine.spatialBusCount)
+                for pad in 0..<Harmony.padCount {
+                    level[DroneEngine.bus(pad: pad)] += Double(model.engine.meters[pad])
+                }
+
+                for bus in 0..<DroneEngine.spatialBusCount {
+                    let tier = bus / SpatialField.azimuths
+                    let col = bus % SpatialField.azimuths
+                    let az = Double(col) / Double(SpatialField.azimuths) * 2 * .pi
+                    let r = tier == 0 ? inner : outer
+                    // Screen y grows downward, and ahead is up.
+                    let p = CGPoint(x: c.x + CGFloat(sin(az)) * r,
+                                    y: c.y - CGFloat(cos(az)) * r)
+                    let v = min(1.0, level[bus])
+                    let d: CGFloat = v > 0.004 ? 5 + CGFloat(v) * 7 : 4
+                    let color = v > 0.004
+                        ? Color(hue: hue, saturation: 0.7, brightness: 1).opacity(0.35 + 0.65 * v)
+                        : Color.white.opacity(0.14)
+                    ctx.fill(Circle().path(in: CGRect(x: p.x - d / 2, y: p.y - d / 2, width: d, height: d)),
+                             with: .color(color))
+                }
+
+                // Your head, rotated by the tracker.
+                let yaw = model.headTracking ? model.head.yaw * .pi / 180 : 0
+                ctx.stroke(Path { p in
+                    p.move(to: c)
+                    p.addLine(to: CGPoint(x: c.x + CGFloat(sin(yaw)) * inner * 0.55,
+                                          y: c.y - CGFloat(cos(yaw)) * inner * 0.55))
+                }, with: .color(Ink.text.opacity(0.65)), lineWidth: 1.5)
+                ctx.fill(Circle().path(in: CGRect(x: c.x - 3, y: c.y - 3, width: 6, height: 6)),
+                         with: .color(Ink.text.opacity(0.8)))
+            }
+            .opacity(model.spatialEnabled ? 1 : 0.4)
         }
     }
 }
