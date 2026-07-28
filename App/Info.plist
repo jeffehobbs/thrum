@@ -34,5 +34,13 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://jeffehobbs.github.io/thrum/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>78VIUMsV79OFfJAVHC3EdvezY8UAqUBTEoMqi9qjRdo=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

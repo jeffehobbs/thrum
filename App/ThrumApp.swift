@@ -305,6 +305,7 @@ final class ThrumHost: ObservableObject {
 @main
 struct ThrumApp: App {
     @StateObject private var host = ThrumHost()
+    @StateObject private var updates = UpdateController()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -322,7 +323,10 @@ struct ThrumApp: App {
                 }
         }
         .defaultSize(width: 1460, height: 960)
-        .commands { ThrumCommands(model: host.model) }
+        .commands {
+            ThrumCommands(model: host.model)
+            UpdateCommands(updates: updates)
+        }
     }
 }
 

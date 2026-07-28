@@ -16,10 +16,16 @@ Or press the **☯** and let the instrument play itself.
 
 ## Install
 
-Grab `Thrum-1.3.2.zip` from the [latest
+Grab `Thrum-1.4.0.zip` from the [latest
 release](https://github.com/jeffehobbs/thrum/releases/latest), unzip it and drag
 `Thrum.app` to `/Applications`. It's signed and notarized, so it opens without
 any Gatekeeper detour. macOS 14+, universal — Apple silicon and Intel.
+
+From 1.4.0 on it updates itself: Thrum checks for new releases and offers to
+install them, and there's a **Check for Updates…** item in the app menu. The first
+launch asks before it ever phones home, and declining is remembered. If you're on
+1.3.2 or earlier there's no updater in that build to tell you this one exists, so
+this download is a one-time manual step.
 
 A Novation Launchpad X is what makes it an instrument, but the app is playable
 on its own — every control is in the window.
@@ -31,6 +37,8 @@ on its own — every control is in the window.
 ./build.sh run        Release, install to ~/Applications, launch
 ./build.sh debug      Debug build — for the debugger, not for the ears
 ./build.sh notarize   Release → Developer ID sign → notarize → dist/Thrum-<ver>.zip
+                      → docs/appcast.xml
+./build.sh appcast    Regenerate docs/appcast.xml from the existing zip
 ```
 
 Requires Xcode and `xcodegen`. macOS 14+.
@@ -52,6 +60,40 @@ on the next generate, and bumping `MARKETING_VERSION` alone used to notarize a
 correctly-built app that still called itself 1.0. `build.sh` takes the release
 filename from the *bundle*, so check `dist/Thrum-<ver>.zip` is the version you
 meant before shipping.
+
+## Shipping a release
+
+Updates go out through [Sparkle](https://sparkle-project.org). Installed copies
+poll `docs/appcast.xml`, served at
+`https://jeffehobbs.github.io/thrum/appcast.xml` by GitHub Pages, and refuse any
+archive not signed by Thrum's Ed25519 key.
+
+1. Bump **both** `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in
+   `project.yml`. Sparkle compares `CURRENT_PROJECT_VERSION` (`CFBundleVersion`) to
+   decide whether an update exists, so forgetting it ships a release nobody is
+   offered — the app is new, the feed says it isn't.
+2. Optionally write `notes/<version>.html` — Sparkle shows it in the update
+   dialog. Without one the dialog shows version numbers and nothing else.
+3. `./build.sh notarize`
+4. Create the GitHub release **tagged `v<version>`** and attach
+   `dist/Thrum-<version>.zip`. The tag has to match: the appcast's download URL is
+   built as `…/releases/download/v<version>/Thrum-<version>.zip`, and a mismatch is
+   a 404 that only shows up when someone tries to update.
+5. Commit and push `docs/appcast.xml`. **Do this after step 4** — the feed
+   advertises a download that has to already exist.
+
+One-time setup, already done: `generate_keys` created the Ed25519 keypair,
+`SUPublicEDKey` in `project.yml` is its public half, and GitHub Pages needs to be
+serving from `/docs` on `main`.
+
+The private key lives in the login keychain and is the one thing here that cannot
+be replaced. Installed copies trust that key and nothing else, so losing it strands
+every copy in the field on whatever version it has — there is no recovery path
+short of everyone manually downloading a build signed with a new key. Back it up:
+
+```
+build/sparkle-tools/2.9.4/generate_keys -x thrum-sparkle-key.txt
+```
 
 Thrum is signed with the hardened runtime and no entitlements. CoreMIDI
 endpoints and an audio output unit are not restricted resources, and its only

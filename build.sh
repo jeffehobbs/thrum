@@ -11,7 +11,8 @@
 #   ./build.sh run        Release, install to ~/Applications, launch
 #   ./build.sh debug      Debug build — for the debugger, not for the ears
 #   ./build.sh notarize   Release → Developer ID sign → notarize → staple
-#                         → dist/Thrum-<ver>.zip
+#                         → dist/Thrum-<ver>.zip → docs/appcast.xml
+#   ./build.sh appcast    Regenerate docs/appcast.xml from the existing zip
 #
 # Notarizing needs a one-time stored credential profile (Apple ID method):
 #   xcrun notarytool store-credentials thrum-notary \
@@ -27,6 +28,14 @@
 # UserDefaults dictionary. It is deliberately not sandboxed — the sandbox buys
 # nothing for Developer ID distribution here and gets in the way of talking to
 # a class-compliant USB controller.
+#
+# Shipping an update needs one more secret than notarizing does: the Ed25519
+# private key Sparkle signs archives with, held in the login keychain and created
+# once by Sparkle's generate_keys. Its public half is SUPublicEDKey in
+# project.yml. Installed copies refuse any archive not signed by that key, which
+# is the point — and also means losing it strands every copy in the field on
+# whatever version it has. Export a backup with:
+#   build/sparkle-tools/<ver>/generate_keys -x thrum-sparkle-key.txt
 set -e
 cd "$(dirname "$0")"
 
@@ -51,6 +60,102 @@ resolve_notary_profile() {
 
 CONFIG=Release
 [[ "$MODE" == "debug" ]] && CONFIG=Debug
+
+# Sign an app bundle and everything nested inside it, innermost first.
+#
+# This exists because Thrum gained an embedded framework (Sparkle) and the old
+# one-line `codesign "$APP"` silently stopped being sufficient. codesign seals
+# each bundle's contents into its own signature, so signing the outer app first
+# and a nested helper afterwards invalidates the outer seal — the order has to
+# run inside-out, and every nested Mach-O or bundle needs its own call. Get it
+# wrong and it builds, installs and runs perfectly on this machine, then
+# notarization rejects the submission. `--deep` appears to solve this and is
+# discouraged by Apple; doing it explicitly is the supported route.
+#
+# Sparkle's XPC services are only used by sandboxed apps, and Sparkle documents
+# deleting them for apps like Thrum that aren't. They are kept and signed anyway:
+# the saving is about a megabyte, and a mistake here breaks updates for every
+# copy in the field with no way to push a fix.
+sign_inside_out() {
+  local app="$1"
+  local sparkle="$app/Contents/Frameworks/Sparkle.framework"
+  local target
+  # Innermost first. Order within this list matters.
+  for target in \
+    "$sparkle/Versions/B/XPCServices/Downloader.xpc" \
+    "$sparkle/Versions/B/XPCServices/Installer.xpc" \
+    "$sparkle/Versions/B/Updater.app" \
+    "$sparkle/Versions/B/Autoupdate" \
+    "$sparkle" \
+    "$app"
+  do
+    [[ -e "$target" ]] || continue
+    codesign --force --timestamp --options runtime --sign "$DEV_ID" "$target"
+  done
+}
+
+# Sparkle's command-line tools ship in the release tarball, not in the Swift
+# package — the SPM product is only the XCFramework. Cached under build/ so it
+# is fetched once and never committed.
+SPARKLE_VERSION="2.9.4"
+
+# Write docs/appcast.xml — the file every installed copy of Thrum polls to find
+# out whether a newer one exists.
+#
+# Built from a staging directory holding *only* this release rather than from
+# dist/ directly, and that is deliberate. generate_appcast signs every archive it
+# finds and stamps them all with one --download-url-prefix, so pointing it at a
+# dist/ that has accumulated older builds would emit entries claiming v1.2 lives
+# under the v1.4.0 release tag. Those are 404s that only reveal themselves when
+# someone on an old version tries to update. The cost is giving up delta patches,
+# which need the older archives present — not worth it for a zip this size.
+#
+# Release notes are picked up automatically from notes/<version>.html if you
+# write one; without it Sparkle shows the version numbers and nothing else.
+make_appcast() {
+  local ver="$1" zip="$2"
+  local tools; tools=$(resolve_sparkle_tools) || return 1
+  local stage; stage=$(mktemp -d)
+
+  cp "$zip" "$stage/"
+  [[ -f "notes/$ver.html" ]] && cp "notes/$ver.html" "$stage/Thrum-$ver.html"
+
+  mkdir -p docs
+  echo "▸ Generating appcast for $ver…"
+  # The private key comes from the login keychain; macOS may prompt to allow it.
+  "$tools/generate_appcast" \
+    --download-url-prefix "https://github.com/jeffehobbs/thrum/releases/download/v$ver/" \
+    --link "https://github.com/jeffehobbs/thrum" \
+    -o docs/appcast.xml \
+    "$stage"
+
+  rm -rf "$stage"
+
+  # A feed that parses but carries no signature would be accepted by nothing —
+  # installed copies reject unsigned archives — so fail loudly here rather than
+  # shipping a feed that silently never updates anyone.
+  if ! grep -q 'sparkle:edSignature' docs/appcast.xml; then
+    echo "✗ appcast has no EdDSA signature. Is the private key in the keychain?" >&2
+    return 1
+  fi
+  echo "▸ Wrote docs/appcast.xml"
+}
+
+resolve_sparkle_tools() {
+  local dir="build/sparkle-tools/$SPARKLE_VERSION"
+  if [[ ! -x "$dir/generate_appcast" ]]; then
+    echo "▸ Fetching Sparkle $SPARKLE_VERSION tools…" >&2
+    mkdir -p "$dir"
+    local tarball="$dir/sparkle.tar.xz"
+    curl -sSfL -o "$tarball" \
+      "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz" \
+      || { echo "✗ Could not download Sparkle $SPARKLE_VERSION." >&2; return 1; }
+    tar -xJf "$tarball" -C "$dir" bin
+    mv "$dir/bin/"* "$dir/" && rmdir "$dir/bin"
+    rm -f "$tarball"
+  fi
+  echo "$dir"
+}
 
 xcodegen generate --quiet
 
@@ -96,8 +201,11 @@ if [[ "$MODE" == "notarize" ]]; then
   mkdir -p dist
 
   echo "▸ Signing with Developer ID (hardened runtime + secure timestamp)…"
-  codesign --force --timestamp --options runtime --sign "$DEV_ID" "$APP"
-  codesign --verify --strict --verbose=2 "$APP"
+  sign_inside_out "$APP"
+  # --deep on the *verify* side is fine and wanted; it is only --deep signing
+  # that Apple discourages. This is the check that would have caught the
+  # framework being left ad-hoc, which notarization rejects.
+  codesign --verify --strict --deep --verbose=2 "$APP"
 
   echo "▸ Submitting to Apple notary service as '$PROFILE' (this can take a few minutes)…"
   SUBMIT_ZIP="dist/Thrum-$VER-submit.zip"
@@ -113,4 +221,12 @@ if [[ "$MODE" == "notarize" ]]; then
   rm -f "$SUBMIT_ZIP" "$DIST_ZIP"
   ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIST_ZIP"
   echo "▸ Notarized & stapled: $DIST_ZIP"
+
+  make_appcast "$VER" "$DIST_ZIP"
+fi
+
+if [[ "$MODE" == "appcast" ]]; then
+  VER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")
+  [[ -f "dist/Thrum-$VER.zip" ]] || { echo "✗ dist/Thrum-$VER.zip not found — run ./build.sh notarize first." >&2; exit 1; }
+  make_appcast "$VER" "dist/Thrum-$VER.zip"
 fi
