@@ -59,6 +59,12 @@ final class ThrumHost: ObservableObject {
     private var spatialBuilt = false
 
     init() {
+        // Read once and keep it. The rate gets frozen into eighteen source-node
+        // formats below, and moving it afterwards without rebuilding all of them
+        // would leave the synth computing phase increments for one rate while the
+        // graph plays them at another — a transposed drone. So the engine stays at
+        // whatever it started at and the mixer's converter absorbs any difference
+        // with the hardware, which is the cheaper of the two mistakes.
         var sr = audio.outputNode.outputFormat(forBus: 0).sampleRate
         if sr < 8000 { sr = 48000 }
         sampleRate = sr
@@ -105,6 +111,14 @@ final class ThrumHost: ObservableObject {
                 AVAudio3DAngularOrientation(yaw: Float(-yaw), pitch: Float(-pitch), roll: Float(-roll))
         }
 
+        // Both land on the same place; the route changes on its own when the
+        // system output moves, the mode changes when the user overrides it.
+        model.route.onChange = { [weak self] in
+            self?.applyRenderMode()
+            self?.announceRoute()
+        }
+        model.onRenderModeChange = { [weak self] in self?.applyRenderMode() }
+
         buildSpatialGraph()
 
         do {
@@ -113,7 +127,32 @@ final class ThrumHost: ObservableObject {
             model.show("Audio engine failed to start: \(error.localizedDescription)")
         }
         applyField()
+        applyRenderMode()
+        announceRoute()
         watchAudio()
+    }
+
+    /// Say something only when the route has a consequence worth knowing about.
+    ///
+    /// Which is really only latency. Announcing every route change would put
+    /// "Out to MacBook Pro Speakers" over the status line every time headphones
+    /// come out, which is both obvious and in the way — whereas finding out that
+    /// AirPlay has put two seconds between the pad and the sound is much better
+    /// learned from a status line than from a stage.
+    private func announceRoute() {
+        guard let warning = model.route.latencyWarning else { return }
+        model.show("\(model.route.name) — \(warning)")
+    }
+
+    /// How the HRTF stage renders. Not a graph change — it can happen live, so a
+    /// speaker being plugged in mid-drone costs nothing.
+    private func applyRenderMode() {
+        guard spatialBuilt else { return }
+        switch model.spatialRender {
+        case .auto:       environment.outputType = model.route.environmentOutputType
+        case .headphones: environment.outputType = .headphones
+        case .speakers:   environment.outputType = .externalSpeakers
+        }
     }
 
     // MARK: - Spatial graph
@@ -225,7 +264,16 @@ final class ThrumHost: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: audio, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.restartAudioIfNeeded(reason: "output device changed") }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // The route has very likely just changed too — this notification
+                // and the CoreAudio default-device listener are two views of the
+                // same event — so re-read it here rather than relying on which
+                // one arrives first.
+                self.model.route.refresh()
+                self.applyRenderMode()
+                self.restartAudioIfNeeded(reason: "output device changed")
+            }
         }
         // Belt and braces: anything else that stops it gets picked up within a
         // second or so.
@@ -249,6 +297,7 @@ final class ThrumHost: ObservableObject {
         audioWatchdog?.invalidate()
         launchpad.shutdown()
         model.pulse.stop()
+        model.route.shutdown()
         audio.stop()
     }
 }
@@ -340,6 +389,14 @@ struct ThrumCommands: Commands {
             Button("Recenter") { model.head.recenter() }
                 .keyboardShortcut("r", modifiers: [.command, .option])
                 .disabled(!model.headTracking)
+            Divider()
+            Menu("Render Field For") {
+                ForEach(ThrumModel.SpatialRender.allCases) { mode in
+                    Button(model.spatialRender == mode ? "✓  \(mode.rawValue)" : mode.rawValue) {
+                        model.spatialRender = mode
+                    }
+                }
+            }
         }
     }
 }

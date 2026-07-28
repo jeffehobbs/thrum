@@ -152,6 +152,38 @@ public final class ThrumModel: ObservableObject {
         }
     }
 
+    // MARK: Output route
+
+    /// What the drone is coming out of. Owned here for the same reason as `head`
+    /// — the host and the UI have to be holding the same object. Read-only: the
+    /// device itself is chosen in Control Centre, which for AirPlay is the only
+    /// place it *can* be chosen. See `AudioRoute`.
+    public let route = AudioRoute()
+
+    /// Overrides what the route implies about how to render the spatial field.
+    ///
+    /// The route heuristic guesses right for AirPods and for an interface feeding
+    /// a PA, and wrong for the one case that is neither: a *Bluetooth speaker*,
+    /// which looks like AirPods to CoreAudio and sounds like a room. Rather than
+    /// pretend the guess is always right, it is a switch.
+    public enum SpatialRender: String, CaseIterable, Identifiable, Sendable {
+        case auto = "Auto"
+        case headphones = "Headphones"
+        case speakers = "Speakers"
+        public var id: String { rawValue }
+    }
+
+    @Published public var spatialRender: SpatialRender = .auto {
+        didSet {
+            guard spatialRender != oldValue else { return }
+            onRenderModeChange?()
+        }
+    }
+
+    /// Set by the host; re-reads the render mode and pushes it onto the
+    /// environment node. Cheap — no graph change, no restart.
+    public var onRenderModeChange: (() -> Void)?
+
     /// True when no voice is sounding *and* none is still fading. Drives the
     /// on-screen animation, which otherwise redraws a canvas twenty times a
     /// second to show nothing.

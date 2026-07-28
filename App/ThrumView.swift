@@ -712,10 +712,12 @@ private struct FlowButton: View {
 private struct SpatialPanel: View {
     @ObservedObject var model: ThrumModel
     @ObservedObject var head: HeadTracker
+    @ObservedObject var route: AudioRoute
 
     init(model: ThrumModel) {
         self.model = model
         self.head = model.head
+        self.route = model.route
     }
 
     var body: some View {
@@ -774,6 +776,8 @@ private struct SpatialPanel: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     if model.spatialEnabled {
+                        renderRow
+
                         Text("Set macOS's own Spatial Audio to Off for your AirPods — two lots of HRTF smears it.")
                             .font(.system(size: 9.5, weight: .medium, design: .rounded))
                             .foregroundStyle(Ink.amber.opacity(0.8))
@@ -781,6 +785,50 @@ private struct SpatialPanel: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Which HRTF target the field is rendered for.
+    ///
+    /// Worth a control rather than a guess because the wrong choice is audible
+    /// and reads as a broken feature: headphone binaural played over a speaker
+    /// in a room comes out hollow and phasey, since the ear-to-ear crosstalk it
+    /// spent its effort cancelling never happens. The route gets it right for
+    /// AirPods and for an interface feeding a PA. It gets it wrong for a
+    /// Bluetooth speaker, which looks like AirPods to CoreAudio.
+    private var renderRow: some View {
+        HStack(spacing: 6) {
+            Text("RENDER FOR")
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .tracking(1.2)
+                .foregroundStyle(Ink.faint)
+
+            ForEach(ThrumModel.SpatialRender.allCases) { mode in
+                Button { model.spatialRender = mode } label: {
+                    Text(mode == .auto ? autoLabel : mode.rawValue)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .frame(width: mode == .auto ? 84 : 76, height: 24)
+                }
+                .buttonStyle(Chip(active: model.spatialRender == mode, hue: 0.55))
+                .help(help(for: mode))
+            }
+        }
+    }
+
+    /// Auto says what it resolved to, so the button is a readout as well as a
+    /// choice — otherwise the only way to know which way it went is by ear.
+    private var autoLabel: String {
+        route.environmentOutputType == .headphones ? "Auto · phones" : "Auto · room"
+    }
+
+    private func help(for mode: ThrumModel.SpatialRender) -> String {
+        switch mode {
+        case .auto:
+            return "Follows the output device: headphones and Bluetooth get binaural, AirPlay and interfaces get speaker rendering."
+        case .headphones:
+            return "Force binaural. Right for AirPods; hollow and phasey over a speaker in a room."
+        case .speakers:
+            return "Force speaker rendering. Right for AirPlay, a PA, or a Bluetooth speaker — anything CoreAudio calls Bluetooth but you can hear across the room."
         }
     }
 }
