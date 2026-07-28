@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Thrum</title>
+        <item>
+            <title>1.4.0</title>
+            <pubDate>Tue, 28 Jul 2026 17:41:50 -0400</pubDate>
+            <link>https://github.com/jeffehobbs/thrum</link>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jeffehobbs/thrum/releases/download/v1.4.0/Thrum-1.4.0.zip" length="3036250" type="application/octet-stream" sparkle:edSignature="tsMQp1zLE647/YH7QOUh3V9YXVSVfwaFTaLyH6/N/6mPwK2M34B+NSjT6abhvbpWypZR2aGS9QTmIfRxoZp3Aw=="/>
+        </item>
+    </channel>
+</rss>
