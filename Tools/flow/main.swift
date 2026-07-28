@@ -33,6 +33,9 @@ func runFlowChecks() {
         engine.setSampleRate(48000)
         let model = ThrumModel(engine: engine)
         let volumeAtStart = model.value(.masterVolume)
+        let keyAtStart = model.harmony.keyPitchClass
+        let octaveAtStart = model.harmony.rootOctave
+        var keyMoved = false
         var run = Run()
 
         var previous: [Param: Double] = [:]
@@ -55,11 +58,19 @@ func runFlowChecks() {
                 previous[p] = v
             }
             if anyMoved { run.moved += 1 }
+            if model.harmony.keyPitchClass != keyAtStart
+                || model.harmony.rootOctave != octaveAtStart { keyMoved = true }
             run.ticks += 1
         }
         for p in Param.allCases { run.finals[p] = model.value(p) }
         check(model.value(.masterVolume) == volumeAtStart,
               "Output is never touched", "started \(volumeAtStart), ended \(model.value(.masterVolume))")
+        // Moving the key glides every sounding pitch at once by a fourth or a
+        // fifth; moving the register does it by an octave. Both were tried, both
+        // got the slow glide and the breath, and neither was enough — under a
+        // director it still reads as an event nobody asked for. Flow stays put.
+        check(!keyMoved, "the key and the register never move",
+              "key \(keyAtStart) → \(model.harmony.keyPitchClass), octave \(octaveAtStart) → \(model.harmony.rootOctave)")
         model.flow.stop()
         return run
     }
@@ -99,7 +110,7 @@ func runFlowChecks() {
               String(format: "min %.2f", a.minSeen[p] ?? 0))
     }
 
-    print("\n— how long a fifth takes to arrive —")
+    print("\n— how long a pitch change takes to arrive —")
 
     // The user-visible complaint that produced `glideSeconds`: in Flow, a key
     // change is nobody's decision, so a 700-cent sweep in half a second reads as
@@ -139,9 +150,9 @@ func runFlowChecks() {
     let inFlow = glideTime(FlowDirector.flowGlide)
     print(String(format: "       by hand (%.2f s setting): arrives in %.1f s", FlowDirector.handGlide, byHand))
     print(String(format: "       in Flow (%.2f s setting): arrives in %.1f s", FlowDirector.flowGlide, inFlow))
-    check(byHand < 4, "a hand-made key change still arrives promptly",
+    check(byHand < 4, "a hand-made change still arrives promptly",
           String(format: "%.1f s", byHand))
-    check(inFlow > byHand * 4, "Flow's key change is a modulation, not a sweep",
+    check(inFlow > byHand * 4, "in Flow a pitch change is a modulation, not a sweep",
           String(format: "%.1f s vs %.1f s", inFlow, byHand))
 
     print("\n— it should be a different journey every time —")

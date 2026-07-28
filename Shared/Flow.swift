@@ -193,8 +193,16 @@ public final class FlowDirector: ObservableObject {
 
     // MARK: - Gestures
 
+    /// Note what is *not* here: the key never moves, and neither does the
+    /// register. Both were tried and both are too disruptive under a director —
+    /// moving the key glides every sounding pitch by a fourth or a fifth, and
+    /// moving the register glides them all by an octave, and no amount of
+    /// stretching the glide or hiding it under a breath stops that reading as an
+    /// event you didn't ask for. Flow stays in the key it was given and finds its
+    /// variety inside it: modes, voicings, registers of the *voicing*,
+    /// temperaments, timbres and arpeggios.
     private enum Gesture: CaseIterable {
-        case drift, voicing, mode, key, timbre, pulse, jawari, tuning, field
+        case drift, voicing, mode, register, timbre, pulse, jawari, tuning, field
 
         /// Seconds between firings. Mutually unrelated on purpose — the whole
         /// instrument is built on periods that never line up, and this is that
@@ -204,7 +212,7 @@ public final class FlowDirector: ObservableObject {
             case .drift:   return (9, 23)
             case .voicing: return (110, 270)
             case .mode:    return (150, 330)
-            case .key:     return (280, 640)
+            case .register: return (95, 240)
             case .timbre:  return (210, 470)
             case .pulse:   return (75, 200)
             case .jawari:  return (130, 290)
@@ -253,21 +261,21 @@ public final class FlowDirector: ObservableObject {
         case .mode:
             model.setMode(rng.pick(Self.restfulModes))
 
-        case .key:
-            // The largest harmonic move Flow makes, so it gets both protections:
-            // the glide is already wound out to seven and a half seconds, and the
-            // change happens under a breath, with the drone down at a fifth of its
-            // level while the pitches travel. A fourth or a fifth shares the most
-            // notes with where you already were, which is the rest of why it sits.
-            let up = rng.chance(0.5)
-            let octaveInstead = rng.chance(0.28)
-            breathe {
-                if octaveInstead {
-                    self.model.nudgeOctave(self.model.harmony.rootOctave >= 4 ? -1 : 1)
-                } else {
-                    self.model.nudgeKey(up ? 7 : -5)
-                }
-            }
+        case .register:
+            // Where the drone sits, without moving what it is. The same scale
+            // degree is let go in one octave and swelled in another, so this is a
+            // crossfade rather than a glide — the pitch that arrives was never
+            // somewhere else. That is the whole reason it can be done in the open
+            // while a key change cannot.
+            guard let from = soundingPad() else { return }
+            let col = from % Harmony.cols
+            let rows = (0..<Harmony.rows).filter { $0 != from / Harmony.cols }
+            guard !rows.isEmpty else { return }
+            let to = rows[rng.int(rows.count)] * Harmony.cols + col
+            guard !model.padOn[to] else { return }
+            let level = model.padLevel[from]
+            model.release(pad: from)
+            model.sound(pad: to, level: min(0.85, max(0.22, level)))
 
         case .timbre:
             breathe {

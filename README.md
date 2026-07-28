@@ -19,7 +19,7 @@ Or press the **☯** and let the instrument play itself.
 
 ## Install
 
-Grab `Thrum-1.3.zip` from the [latest
+Grab `Thrum-1.3.1.zip` from the [latest
 release](https://github.com/jeffehobbs/thrum/releases/latest), unzip it and drag
 `Thrum.app` to `/Applications`. It's signed and notarized, so it opens without
 any Gatekeeper detour. macOS 14+, Apple silicon or Intel.
@@ -371,14 +371,22 @@ The whole design is in the transitions, not the destinations. Two rules:
 
 Every gesture runs on its own clock at its own tempo, so nothing lines up:
 parameters drift every ten seconds or so, voicings turn over every two to four
-minutes, the key moves maybe twice an hour. That is the same idea as the engine's
-prime-numbered modulation, one level up.
+minutes, temperament shifts maybe twice an hour. That is the same idea as the
+engine's prime-numbered modulation, one level up.
+
+**The key never moves, and neither does the register.** Both were built and both
+were wrong: moving the key glides every sounding pitch by a fourth or a fifth,
+moving the register does it by an octave, and no amount of stretching the glide
+or hiding it under a breath stops that reading as an event nobody asked for. Flow
+stays in the key it was handed and finds its variety inside it — modes, voicings,
+which octaves the voicing occupies, temperaments, timbres, arpeggios. There is a
+test that holds it to that.
 
 **It is a different journey every time** — the generator is reseeded on every
 start, not just at launch.
 
-Two things Flow will not do. It never touches **Output**, because the volume is
-yours. And **Presence Cut** has a floor of 0.45, because energy around 3 kHz is
+Two more things Flow will not do. It never touches **Output**, because the volume
+is yours. And **Presence Cut** has a floor of 0.45, because energy around 3 kHz is
 what makes a long drone tiring and Flow is the one mode that runs for hours
 unattended. Turning Flow off leaves everything exactly where it drifted to, which
 is often a better patch than the one you started from.
