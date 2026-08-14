@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Thrum Flow collects nothing and sends nothing anywhere. There is no
+       network code in the target at all: no analytics, no crash reporter, no
+       account, no server. Both of the arrays below are therefore empty, and that
+       is a statement of fact rather than a default left in place.
+
+       The one entry that is here is required whether or not anything is
+       collected. `Shared/Flow.swift` writes `flow.lastKey` to UserDefaults so a
+       relaunch cannot open in the key the last session was in — a passive app is
+       killed between listens far more often than it is stopped, so without it
+       every session would be able to repeat the last one. UserDefaults is on
+       Apple's required-reason list, and CA92.1 is the reason that fits exactly:
+       information accessible only to this app, never shared with anything.
+
+       Nothing else in the target touches a required-reason API. The taste
+       database is an ordinary file written with `Data.write(to:options:.atomic)`
+       in Application Support; no file *timestamps* are read, no disk space is
+       queried, and no boot time or active-keyboard information is used. If any
+       of that changes, this file has to change with it — a missing declaration
+       is ITMS-91053 on upload, not a warning you find later. -->
+  <key>NSPrivacyTracking</key>
+  <false/>
+  <key>NSPrivacyTrackingDomains</key>
+  <array/>
+  <key>NSPrivacyCollectedDataTypes</key>
+  <array/>
+  <key>NSPrivacyAccessedAPITypes</key>
+  <array>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array>
+        <string>CA92.1</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

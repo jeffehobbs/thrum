@@ -67,3 +67,100 @@ targets:
         # string, so this is the number that decides whether an installed copy
         # thinks an update exists. It must go up every single release.
         CURRENT_PROJECT_VERSION: "7"
+
+  # Thrum Flow — the passive iOS/iPadOS build. Same engine, no instrument: Flow
+  # plays it and a Metal field shows what it is doing.
+  #
+  # Shares `Shared/` verbatim with the Mac app rather than forking it. That was
+  # only possible because ten of its eleven files were already platform-neutral;
+  # AudioRoute was the exception and is now split with `#if os(macOS)` around the
+  # CoreAudio HAL, since iOS answers the same question through AVAudioSession.
+  # `App/` (Launchpad, Launch Control, Sparkle) is macOS-only and stays out.
+  ThrumFlow:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    # `iOS/Assets.xcassets` is its own catalog rather than the Mac app's, because
+    # the two platforms need incompatible artwork: the macOS icon is an inset tile
+    # with rounded corners and a transparent margin, and iOS refuses any alpha
+    # channel at all (ITMS-90717) and masks its own corners. Both are rendered
+    # from Tools/icon — `--ios` gives the full-bleed opaque variant.
+    sources:
+      - iOS
+      - Shared
+    info:
+      path: iOS/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleDisplayName: Thrum
+        LSApplicationCategoryType: public.app-category.music
+        # The whole premise: keep playing with the screen off. Without this the
+        # drone stops the moment the phone locks, which is when a passive
+        # ambient app is most likely to be wanted.
+        UIBackgroundModes: [audio]
+        NSMotionUsageDescription: Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head. Nothing is recorded or sent anywhere.
+        UILaunchScreen:
+          UIColorName: ""
+        # Every orientation on both idioms — this is a thing you prop up and
+        # leave, so which way up it happens to be is not our business.
+        UISupportedInterfaceOrientations~iphone:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        # Declared here so App Store Connect stops asking per build. Thrum uses no
+        # encryption of its own and nothing beyond what the OS provides, which is
+        # the exempt case — the question is otherwise a manual gate on every
+        # single TestFlight upload.
+        ITSAppUsesNonExemptEncryption: false
+        # CarPlay arrives as a second UIScene, which means declaring a scene
+        # manifest — and once you declare one, you must declare *every* role you
+        # use, including the ordinary window scene SwiftUI would otherwise have
+        # set up implicitly. The window role therefore appears with a name and no
+        # delegate class: SwiftUI still manages it. Omitting it launches to a
+        # black screen, which looks nothing like a manifest problem.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: Thrum CarPlay
+                UISceneClassName: CPTemplateApplicationScene
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrumflow
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 1 = iPhone, 2 = iPad. Both, and the layout is centred and unconstrained
+        # so there is nothing idiom-specific to maintain.
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        MARKETING_VERSION: "1.0.1"
+        # Uploaded to TestFlight so far: 1 on 2026-08-08, 3 on 2026-08-10 (the head
+        # tracking wrap/slew fix and the thumbs layout).
+        #
+        # 1.0.1 carries the real fix for the warble those earlier builds were chasing:
+        # the head-tracking transport now smooths a quaternion instead of three Euler
+        # angles. See `HeadSmoother`.
+        #
+        # App Store Connect rejects a build number it has already seen, so this goes
+        # up before the next build rather than after a failure. It is not the last
+        # word though: `./build.sh testflight` exports with
+        # `manageAppVersionAndBuildNumber` on, so Xcode asks App Store Connect what it
+        # has seen and bumps past it at export time — which is how an archive of 2
+        # became build 3. Keep this current anyway; it is the only record in the repo
+        # of what has actually shipped.
+        CURRENT_PROJECT_VERSION: "9"
+        # Metal shaders are compiled from iOS/Shaders.metal by the default build
+        # rule; -O keeps the fragment loop tight, which matters at 5 M pixels.
+        MTL_ENABLE_DEBUG_INFO: NO
+        MTL_FAST_MATH: YES

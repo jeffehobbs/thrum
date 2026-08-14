@@ -4,9 +4,8 @@ import Foundation
 // is a property you can measure rather than listen for — so this drives the
 // director through hours of compressed time and watches every control.
 //
-//   swiftc -O -o /tmp/thrumflow \
-//     Shared/{Tuning,Harmony,Timbre,Events,Cathedral,DroneEngine,Pulse,Spatial,ThrumModel,Flow}.swift \
-//     Tools/flow/main.swift
+//   swiftc -O -o /tmp/thrumflow Shared/*.swift \
+//     Tools/spatial/ablholder.swift Tools/flow/main.swift
 //   /tmp/thrumflow
 
 var fails = 0
@@ -33,8 +32,6 @@ func runFlowChecks() {
         engine.setSampleRate(48000)
         let model = ThrumModel(engine: engine)
         let volumeAtStart = model.value(.masterVolume)
-        let keyAtStart = model.harmony.keyPitchClass
-        let octaveAtStart = model.harmony.rootOctave
         var keyMoved = false
         var run = Run()
 
@@ -42,6 +39,12 @@ func runFlowChecks() {
         for p in Param.allCases { previous[p] = model.value(p) }
 
         model.flow.start()
+        // Read after `start()`, not before: on the phone Flow chooses the key as it
+        // starts, and what this run is checking is that the key never moves *while
+        // it plays*. Those are different claims and only the second one is a
+        // promise — see `picksKeyOnStart`.
+        let keyAtStart = model.harmony.keyPitchClass
+        let octaveAtStart = model.harmony.rootOctave
         let total = Int(hours * 3600 / step)
         for _ in 0..<total {
             model.flow.advance(by: step)
@@ -160,6 +163,107 @@ func runFlowChecks() {
     let differing = Param.allCases.filter { abs((a.finals[$0] ?? 0) - (b.finals[$0] ?? 0)) > 1e-6 }.count
     check(differing >= 8, "two runs end up somewhere different",
           "\(differing) of \(Param.allCases.count) controls differ")
+
+    print("\n— a different key every time it is started (the phone's mode) —")
+
+    // The bug this answers: `Harmony` defaults to D Dorian, the phone has no grid
+    // to change it from, and Flow never moves the key once running — so every
+    // session ThrumFlow had ever played was a modal variant of D. Checked by
+    // starting and stopping many times rather than by reading the code, because
+    // "picks a key" and "picks a key that isn't the one it just had" differ by one
+    // `filter` and only the second is worth having.
+    var keys: [Int] = []
+    var repeats = 0
+    do {
+        let engine = DroneEngine()
+        engine.setSampleRate(48000)
+        let model = ThrumModel(engine: engine)
+        model.flow.picksKeyOnStart = true
+        for _ in 0..<60 {
+            let before = model.harmony.keyPitchClass
+            model.flow.start()
+            let now = model.harmony.keyPitchClass
+            if now == before { repeats += 1 }
+            keys.append(now)
+            // A few minutes of playing, so the key is also checked to sit still
+            // through a whole session's worth of gestures rather than just at t=0.
+            let sessionKey = now
+            for _ in 0..<3000 { model.flow.advance(by: step) }
+            if model.harmony.keyPitchClass != sessionKey { repeats += 1000 }
+            model.flow.stop()
+        }
+    }
+    check(repeats == 0, "no session opens in the key the last one was in",
+          "\(repeats) repeats in \(keys.count) starts")
+    check(Set(keys).count >= 9, "the keys spread across the circle",
+          "\(Set(keys).count) distinct of 12 in \(keys.count) starts")
+
+    // And the same across a cold launch, which on a phone is the common case: a
+    // fresh model knows nothing, so without the stored key this would be a 1-in-11
+    // chance of opening exactly where the last listen left off.
+    var coldRepeats = 0
+    for _ in 0..<40 {
+        let last = keys.last!
+        let engine = DroneEngine()
+        engine.setSampleRate(48000)
+        let model = ThrumModel(engine: engine)      // as if the app had just launched
+        model.flow.picksKeyOnStart = true
+        model.flow.start()
+        if model.harmony.keyPitchClass == last { coldRepeats += 1 }
+        keys.append(model.harmony.keyPitchClass)
+        model.flow.stop()
+    }
+    check(coldRepeats == 0, "nor after a relaunch", "\(coldRepeats) repeats in 40 cold starts")
+
+    // And the Mac's: the player's key is the player's.
+    do {
+        let engine = DroneEngine()
+        engine.setSampleRate(48000)
+        let model = ThrumModel(engine: engine)
+        model.setKey(7)
+        model.flow.start()
+        for _ in 0..<600 { model.flow.advance(by: step) }
+        check(model.harmony.keyPitchClass == 7, "left off, Flow honours the key it was handed",
+              "asked for 7, got \(model.harmony.keyPitchClass)")
+        model.flow.stop()
+    }
+
+    print("\n— does the field actually move —")
+
+    // The iOS bug this measures: `field` only reaches the audio graph through
+    // `onFieldChange`, the phone's host never wired it, and so sixteen bus
+    // positions stayed at their defaults for the app's whole life while Flow
+    // happily ramped Radius and Lift into a void. Nothing offline can test a host
+    // callback, but this pins down what the host was throwing away — if the
+    // geometry barely moves, wiring it up buys nothing and the subtlety is
+    // elsewhere.
+    do {
+        let engine = DroneEngine()
+        engine.setSampleRate(48000)
+        let model = ThrumModel(engine: engine)
+        model.spatialEnabled = true           // the Field gesture is gated on it
+        var updates = 0
+        var radii: [Double] = []
+        var lifts: [Double] = []
+        model.onFieldChange = {
+            updates += 1
+            radii.append(model.field.radius)
+            lifts.append(model.field.lift)
+        }
+        model.flow.start()
+        for _ in 0..<Int(1 * 3600 / step) { model.flow.advance(by: step) }
+        model.flow.stop()
+
+        let rSpan = (radii.max() ?? 0) - (radii.min() ?? 0)
+        let lSpan = (lifts.max() ?? 0) - (lifts.min() ?? 0)
+        print(String(format: "       %d geometry updates in an hour, radius %.2f–%.2f m, lift %.0f–%.0f°",
+                     updates, radii.min() ?? 0, radii.max() ?? 0, lifts.min() ?? 0, lifts.max() ?? 0))
+        check(updates > 500, "the field is re-placed continuously, not once", "\(updates) updates")
+        check(rSpan > 0.8, "the ring travels far enough to hear",
+              String(format: "%.2f m of travel", rSpan))
+        check(lSpan > 8, "the octave tiers open and close",
+              String(format: "%.0f° of travel", lSpan))
+    }
 
     print("\n— range actually explored —")
     for p in [Param.brightness, .reverbMix, .tempo, .warmth] {

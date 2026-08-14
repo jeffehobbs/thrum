@@ -21,16 +21,43 @@ import Foundation
 @MainActor
 public final class FlowDirector: ObservableObject {
     @Published public private(set) var isRunning = false
+    /// Held mid-journey. `isRunning` stays true — the session is still this
+    /// session — but the clock stops, so every ramp resumes exactly where it was
+    /// rather than restarting or jumping to where it would have got to.
+    @Published public private(set) var isPaused = false
     /// Seconds since Flow started, for the UI's slow pulse.
     @Published public private(set) var elapsed: Double = 0
 
+    /// Whether Flow gets to choose the key at the moment it starts.
+    ///
+    /// Off on the Mac, where the key is the player's — they set it on the grid and
+    /// Flow has no business overruling it. On the phone there is no grid and
+    /// nothing else ever touches the harmony, so leaving this off meant every
+    /// session opened in the built-in default of D Dorian and, since Flow never
+    /// moves the key once running, spent its entire life on modal variants of D.
+    ///
+    /// This is not the same as the key *drifting*, which stays forbidden for the
+    /// reasons written up on `Gesture` — a fresh key is chosen while nothing is
+    /// sounding yet, so there is no glide and nothing to notice.
+    public var picksKeyOnStart = false
+
     private unowned let model: ThrumModel
+    private var keyPicked = false
     private var timer: Timer?
     private var clock: Double = 0
     private var ramps: [Param: Ramp] = [:]
     private var due: [Gesture: Double] = [:]
     private var pending: [(at: Double, run: () -> Void)] = []
     private var rng = Rng(seed: Rng.freshSeed())
+    /// When each discrete quality last changed, on Flow's own clock. Only used to
+    /// work out how much of a vote it may take — see `Taste.credit(dwell:)`.
+    private var changedAt: [Taste.TraitKind: Double] = [:]
+
+    /// The last vote actually written to the book, and what the drone was at the
+    /// time. See `rate` — this is what stops one opinion being counted five times.
+    private var lastRated: (vote: Taste.Vote, traits: [Taste.TraitKind: Int])?
+
+    private var taste: Taste { model.taste }
 
     public init(model: ThrumModel) {
         self.model = model
@@ -105,8 +132,37 @@ public final class FlowDirector: ObservableObject {
                         duration: max(Self.shortestRamp, seconds))
     }
 
+    /// One drift in six ignores everything the thumbs have taught, and that is not
+    /// a hedge against the learning being wrong — it is the only way it can ever be
+    /// corrected. A control kept inside its learned band is a control whose other
+    /// settings never get heard again, so they never get rated, so the band can only
+    /// ever tighten. Occasionally wandering outside is what keeps the evidence
+    /// coming in.
+    private static let exploration = 0.18
+
     private func drift(_ p: Param, _ bounds: (low: Double, high: Double), over seconds: Double) {
-        ramp(p, to: rng.range(bounds.low, bounds.high), over: seconds)
+        let band = rng.chance(Self.exploration) ? bounds : taste.band(p, within: bounds)
+        ramp(p, to: rng.range(band.low, band.high), over: seconds)
+    }
+
+    // MARK: - Choosing, with a thumb on the scale
+
+    /// Every discrete choice Flow makes goes through here rather than `rng.pick`,
+    /// so a liked mode comes up more often and a disliked one comes up less — and
+    /// nothing is ever off the table, because `Taste.weight` has a floor.
+    private func choose(_ kind: Taste.TraitKind, from candidates: [Int], excluding: Int? = nil) -> Int {
+        var pool = candidates
+        if let excluding, pool.count > 1 { pool.removeAll { $0 == excluding } }
+        guard !pool.isEmpty else { return candidates.first ?? 0 }
+        return rng.pick(pool, weights: taste.weights(kind, pool))
+    }
+
+    private func chooseVoicing(excluding current: ThrumModel.Voicing? = nil) -> ThrumModel.Voicing {
+        var pool = Self.openings
+        if let current, pool.count > 1 { pool.removeAll { $0 == current } }
+        let all = ThrumModel.Voicing.allCases
+        let weights = pool.map { taste.weight(.voicing, all.firstIndex(of: $0) ?? 0) }
+        return rng.pick(pool, weights: weights)
     }
 
     private func after(_ delay: Double, _ run: @escaping () -> Void) {
@@ -124,6 +180,10 @@ public final class FlowDirector: ObservableObject {
         elapsed = 0
         ramps.removeAll()
         pending.removeAll()
+        changedAt.removeAll()
+        // A new journey is a new thing to have an opinion about, even in the case
+        // where the dice happen to hand back the drone that just ended.
+        lastRated = nil
         // Reseeded on every start, not just at launch, so stopping and starting
         // again gives a fresh journey rather than resuming the old one's dice.
         rng = Rng(seed: Rng.freshSeed())
@@ -133,9 +193,11 @@ public final class FlowDirector: ObservableObject {
         for g in Gesture.allCases {
             due[g] = rng.range(g.interval.low * 0.15, g.interval.low * 0.6)
         }
+        // Before anything is gated on, so this is a choice rather than a glide.
+        chooseFreshKey()
         // Something has to be sounding for any of this to mean anything.
         if !model.padOn.contains(true) {
-            model.apply(rng.pick(Self.openings))
+            model.apply(chooseVoicing())
         }
         // Harmony moves slowly in Flow. Every key, mode and temperament change
         // glides at this rate, so a fifth becomes a modulation you notice
@@ -143,14 +205,77 @@ public final class FlowDirector: ObservableObject {
         model.engine.glideSeconds = Self.flowGlide
         model.show("Flow — the instrument takes it from here")
 
+        startClock()
+    }
+
+    private func startClock() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick(0.1) }
         }
     }
 
+    /// Hold everything where it is. Called when the audio stops for a reason that
+    /// is not the end of the session — the listener paused it, or Siri did.
+    ///
+    /// Only the clock stops. Ramps, gesture timers and the taste snapshot's idea of
+    /// how long each quality has been sounding all freeze with it, which is the
+    /// point: a drone paused for a ninety-second phone call should come back to the
+    /// forty-second slide it was in the middle of, not to wherever that slide would
+    /// have finished, and certainly not to a fresh journey. Wall-clock time passing
+    /// while nothing is audible is not time this instrument has lived through.
+    public func pause() {
+        guard isRunning, !isPaused else { return }
+        isPaused = true
+        timer?.invalidate()
+        timer = nil
+    }
+
+    public func resume() {
+        guard isRunning, isPaused else { return }
+        isPaused = false
+        startClock()
+    }
+
+    /// Pick a key — and an opening mode — for this session. Idempotent within a
+    /// run, so a host that wants the key settled *before* it sounds an opening
+    /// voicing can call it itself and `start()` will leave that choice alone.
+    ///
+    /// Every degree of the grid is tuned relative to the root, so no key is
+    /// harmonically better than another here; all that changes between them is how
+    /// high the drone sits, and a pitch class is at most a semitone shy of an
+    /// octave from D either way. The one thing worth ruling out is the key it was
+    /// already in, because a session that opens where the last one ended is
+    /// exactly the complaint this answers — and on a phone that has to outlive the
+    /// process, since a passive app is killed between listens far more often than
+    /// it is stopped and started again. Hence the one value Thrum keeps on disk.
+    ///
+    /// The mode goes with it. Flow already turns modes over every few minutes, but
+    /// the *first* few minutes were always Dorian, and the opening is the part
+    /// anyone hears deliberately.
+    public func chooseFreshKey() {
+        guard picksKeyOnStart, !keyPicked else { return }
+        keyPicked = true
+        let store = UserDefaults.standard
+        let previous = store.object(forKey: Self.lastKeyDefault) as? Int
+            ?? model.harmony.keyPitchClass
+        let candidates: [Int] = (0..<12).filter { $0 != previous }
+        // The one place a learned key preference can be acted on. Flow never moves
+        // the key while it plays, so if the thumbs say this listener keeps liking
+        // drones in B♭, the only moment that can matter is this one.
+        let key = choose(.key, from: candidates)
+        store.set(key, forKey: Self.lastKeyDefault)
+        model.setKey(key)
+        model.setMode(choose(.mode, from: Self.restfulModes))
+    }
+
+    private static let lastKeyDefault = "flow.lastKey"
+
     public func stop() {
         guard isRunning else { return }
         isRunning = false
+        isPaused = false
+        keyPicked = false
         timer?.invalidate()
         timer = nil
         ramps.removeAll()
@@ -169,7 +294,12 @@ public final class FlowDirector: ObservableObject {
     func advance(by dt: Double) { tick(dt) }
 
     private func tick(_ dt: Double) {
-        guard isRunning else { return }
+        // `isPaused` is checked here and not only at the timer, because the timer is
+        // not the only thing that drives this: the offline harness calls `advance`
+        // directly, and a host could too. Pause has to be a property of the director
+        // rather than a property of one particular clock, or "paused" quietly means
+        // "paused unless something else is ticking it".
+        guard isRunning, !isPaused else { return }
         clock += dt
         elapsed = clock
 
@@ -200,7 +330,8 @@ public final class FlowDirector: ObservableObject {
     /// stretching the glide or hiding it under a breath stops that reading as an
     /// event you didn't ask for. Flow stays in the key it was given and finds its
     /// variety inside it: modes, voicings, registers of the *voicing*,
-    /// temperaments, timbres and arpeggios.
+    /// temperaments, timbres and arpeggios. Where the key comes from in the first
+    /// place is a separate question — see `picksKeyOnStart`.
     private enum Gesture: CaseIterable {
         case drift, voicing, mode, register, timbre, pulse, jawari, tuning, field
 
@@ -252,14 +383,18 @@ public final class FlowDirector: ObservableObject {
             // apply() fades what is sounding at the Fade setting and swells the
             // new stack in at the Swell setting, so a voicing change is already a
             // slow crossfade rather than a cut.
-            if rng.chance(0.75) {
-                model.apply(rng.pick(Self.openings))
-            } else if let pad = quietPad() {
+            // Written as "a quarter of the time, add a tone — otherwise rebuild",
+            // rather than the other way round, so that a missing quiet pad falls
+            // through to a real voicing change instead of the gesture doing nothing
+            // at all. Same odds, no silent branch.
+            if rng.chance(0.25), let pad = quietPad() {
                 model.sound(pad: pad, level: rng.range(0.25, 0.55))
+            } else {
+                moveVoicing()
             }
 
         case .mode:
-            model.setMode(rng.pick(Self.restfulModes))
+            moveMode()
 
         case .register:
             // Where the drone sits, without moving what it is. The same scale
@@ -278,9 +413,7 @@ public final class FlowDirector: ObservableObject {
             model.sound(pad: to, level: min(0.85, max(0.22, level)))
 
         case .timbre:
-            breathe {
-                self.model.setTimbre(self.rng.int(TimbreCatalog.all.count))
-            }
+            moveTimbre()
 
         case .pulse:
             shiftPulse()
@@ -289,14 +422,199 @@ public final class FlowDirector: ObservableObject {
             if let pad = soundingPad() { model.toggleSitar(pad: pad) }
 
         case .tuning:
-            // Retuning glides over half a second, so this is a modulation.
-            model.setTuning(rng.pick(TuningSystem.allCases))
+            moveTuning()
 
         case .field:
             guard model.spatialEnabled else { return }
             drift(.fieldRadius, Self.spatialRoam[.fieldRadius]!, over: rng.range(40, 120))
             drift(.fieldLift, Self.spatialRoam[.fieldLift]!, over: rng.range(40, 120))
         }
+    }
+
+    // MARK: - Moving one quality
+
+    /// The four discrete changes Flow can make, each of which **always lands on
+    /// something different from what is sounding**.
+    ///
+    /// That exclusion used to be optional and is now the whole point. A weighted
+    /// draw over eight timbres will pick the current one about an eighth of the
+    /// time, and a "change the timbre" gesture that changes it to itself is a
+    /// gesture that quietly did nothing. Tolerable while these only fired on their
+    /// own timers — you would never know a scheduled change had no-opped. Not
+    /// tolerable now that thumbs-down pulls the next one forward, because then the
+    /// no-op is a button press that produced silence where a change was promised.
+    ///
+    /// They live outside `perform` so that pulling one forward runs exactly the
+    /// scheduled code — the crossfade in `apply`, the glide in `setMode`, the
+    /// nine-second breath around a timbre. A vote changes *when* Flow acts, never
+    /// how carefully.
+
+    private func moveVoicing() {
+        let next = chooseVoicing(excluding: model.voicing)
+        changedAt[.voicing] = clock
+        model.apply(next)
+    }
+
+    private func moveMode() {
+        let next = choose(.mode, from: Self.restfulModes, excluding: model.harmony.modeIndex)
+        changedAt[.mode] = clock
+        model.setMode(next)
+    }
+
+    private func moveTuning() {
+        // Retuning glides over half a second, so this is a modulation.
+        let next = choose(.tuning, from: TuningSystem.allCases.map(\.rawValue),
+                          excluding: model.harmony.tuning.rawValue)
+        changedAt[.tuning] = clock
+        model.setTuning(TuningSystem(rawValue: next) ?? .just5Limit)
+    }
+
+    private func moveTimbre() {
+        let next = choose(.timbre, from: Array(0..<TimbreCatalog.all.count),
+                          excluding: model.timbreIndex)
+        breathe {
+            // Stamped here rather than at the call, because this is when the timbre
+            // actually changes — nine and a half seconds after the breath began.
+            self.changedAt[.timbre] = self.clock
+            self.model.setTimbre(next)
+        }
+    }
+
+    // MARK: - Rating
+
+    /// Two buttons' worth of API.
+    ///
+    /// The two thumbs are deliberately **not** symmetrical in what they do to the
+    /// sound, only in what they teach.
+    ///
+    /// **Thumbs-up changes nothing.** It is filed and that is all. An earlier
+    /// version pushed the disruptive gestures out so a praised drone would last
+    /// longer, and it was wrong for a reason worth keeping written down: saying you
+    /// like something should not be a thing you have to think twice about pressing.
+    /// The moment approving of a drone also silently rearranges it, the button has a
+    /// cost, and a rating button with a cost gets used less and teaches less.
+    ///
+    /// **Thumbs-down brings the next change forward.** Not a new or special change —
+    /// whichever one Flow had already planned next, simply sooner. That keeps every
+    /// transition on the rails it was always going to run on (the crossfade in
+    /// `apply`, the glide in `setMode`, the nine-second breath around a timbre), and
+    /// it means the button never invents an event of its own. What arrives is still
+    /// shaped by the vote, because every choice Flow makes is weighted by taste.
+    /// **One opinion per drone.** A vote is spread across every quality that was
+    /// audible when it was cast, which only averages out if each opinion is cast
+    /// once. Pressing ★ five times while the same drone plays is not five listeners
+    /// agreeing — it is one listener pressing a button five times, and letting it
+    /// through would put five times the weight on whichever key, mode, temperament
+    /// and timbre happened to be sounding. That is the one kind of noise this design
+    /// cannot average away, because it is entirely one-sided.
+    ///
+    /// So the gate is on *what the drone is*, not on the clock: a second vote is
+    /// recorded once any discrete quality has changed, however soon that is, and not
+    /// before, however long the listener waits. A fixed debounce interval would have
+    /// been both too short (Flow holds a voicing for minutes) and too long (⏭ can
+    /// change the drone in a tenth of a second).
+    ///
+    /// Two things deliberately still happen on a repeat press. The listener always
+    /// gets the acknowledgement, because a button that silently ignores you reads as
+    /// broken. And thumbs-down always hurries the next change along — that is what
+    /// makes a second ⏭ meaningful rather than merely tolerated, since by the time it
+    /// lands the drone is a different one and the vote counts.
+    ///
+    /// Changing your mind is not a repeat: the opposite vote on an unchanged drone is
+    /// a new fact and goes in. It is not an undo — nothing is subtracted — but the
+    /// two sides of the ledger are what cancel, so saying both is self-correcting.
+    @discardableResult
+    public func rate(_ vote: Taste.Vote) -> Bool {
+        let snapshot = snapshot()
+        let traits = snapshot.traits.mapValues(\.value)
+        let repeated = lastRated.map { $0.vote == vote && $0.traits == traits } ?? false
+        if !repeated {
+            taste.record(vote, snapshot)
+            lastRated = (vote, traits)
+        }
+
+        guard isRunning else {
+            // Rating the tail of something you have just stopped is legitimate, and
+            // there is nothing to hurry along.
+            model.show(vote == .up ? "Noted — more like that" : "Noted — less like that")
+            return !repeated
+        }
+        switch vote {
+        case .up:
+            model.show("Noted — more like this")
+        case .down:
+            hastenNextChange()
+            model.show("Noted — less like this")
+        }
+        return !repeated
+    }
+
+    /// Gestures that change the character of the drone rather than nudging a
+    /// slider, and that are *guaranteed* to change it — each excludes what is
+    /// already sounding. One of them is always pending, so there is always
+    /// something to pull forward.
+    ///
+    /// `.register` is a characterful change too and is deliberately not here: it
+    /// can legitimately find nowhere to go (every other octave of that column
+    /// already sounding) and quietly return, which is fine on its own timer and
+    /// wrong as the answer to a button press.
+    private static let characterful: [Gesture] = [.voicing, .mode, .timbre, .tuning]
+
+    private func hastenNextChange() {
+        let soonest = Self.characterful.min {
+            (due[$0] ?? .greatestFiniteMagnitude) < (due[$1] ?? .greatestFiniteMagnitude)
+        }
+        guard let soonest else { return }
+        // Due now, so it fires on the next tick and then reschedules itself on its
+        // own interval exactly as if it had come round naturally. Nothing else in
+        // the timetable is touched — pressing it twice does not stack up a queue of
+        // changes waiting to land on top of each other.
+        due[soonest] = clock
+    }
+
+    /// Everything true of the drone at this moment, with each discrete quality
+    /// weighted by how long it has been in place.
+    private func snapshot() -> Taste.Snapshot {
+        var out = Taste.Snapshot()
+
+        func note(_ kind: Taste.TraitKind, _ value: Int) {
+            out.traits[kind] = Taste.Snapshot.Trait(
+                value: value,
+                credit: Taste.credit(dwell: clock - (changedAt[kind] ?? 0)))
+        }
+        note(.key, model.harmony.keyPitchClass)
+        note(.mode, model.harmony.modeIndex)
+        note(.tuning, model.harmony.tuning.rawValue)
+        note(.timbre, model.timbreIndex)
+        if let voicing = model.voicing,
+           let index = ThrumModel.Voicing.allCases.firstIndex(of: voicing) {
+            note(.voicing, index)
+        }
+
+        for p in Self.learnable where audible(p) {
+            out.params[p] = ThrumModel.spec(p).normalized(model.value(p))
+        }
+        return out
+    }
+
+    /// Exactly the controls Flow drives — which is also the set it is allowed to
+    /// learn about. Output is absent because Flow never touches it, so a preference
+    /// for it could only ever record how loud the room was.
+    private static let learnable: [Param] = Array(roam.keys) + Array(spatialRoam.keys)
+
+    private static let pulseOnly: Set<Param> = [.tempo, .pluckAttack, .pluckDecay,
+                                                .arpLevel, .swing, .humanize]
+
+    /// Whether this control is currently making any difference to what is coming
+    /// out. Filing an opinion about Field Radius while the phone is on its own
+    /// speaker, or about Accent with no arpeggio running, is recording a preference
+    /// about something the listener demonstrably could not hear — and enough of
+    /// those is how a database of real preferences turns into noise.
+    private func audible(_ p: Param) -> Bool {
+        if Self.spatialRoam[p] != nil { return model.spatialEnabled }
+        if Self.pulseOnly.contains(p) { return model.pulseRunning }
+        if p == .sitarDepth { return model.padSitar.contains { $0 > 0.01 } }
+        return true
     }
 
     /// Dip the whole drone, do something that would otherwise jump, bring it
@@ -396,4 +714,21 @@ struct Rng {
     mutating func int(_ n: Int) -> Int { n <= 0 ? 0 : min(n - 1, Int(unit() * Double(n))) }
     mutating func chance(_ p: Double) -> Bool { unit() < p }
     mutating func pick<T>(_ xs: [T]) -> T { xs[int(xs.count)] }
+
+    /// Roulette-wheel draw, for the one thing Flow uses learned preferences for:
+    /// tilting a choice without removing any of the options. Falls back to a flat
+    /// pick on anything malformed — a bad weight array should make this feature
+    /// invisible, never make Flow stop choosing.
+    mutating func pick<T>(_ xs: [T], weights: [Double]) -> T {
+        guard xs.count > 1, weights.count == xs.count else { return xs[int(xs.count)] }
+        var total = 0.0
+        for w in weights where w > 0 && w.isFinite { total += w }
+        guard total > 0 else { return xs[int(xs.count)] }
+        var r = unit() * total
+        for (i, w) in weights.enumerated() where w > 0 && w.isFinite {
+            r -= w
+            if r <= 0 { return xs[i] }
+        }
+        return xs[xs.count - 1]
+    }
 }

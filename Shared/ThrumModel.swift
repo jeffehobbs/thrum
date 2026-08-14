@@ -100,6 +100,30 @@ public final class ThrumModel: ObservableObject {
 
     @Published public var tones: [GridTone] = []
 
+    /// The last voicing applied, or nil if nothing is sounding from one.
+    ///
+    /// Kept only so a vote has something to file the voicing under — `padOn` says
+    /// which notes are sounding but not which of the fifteen stacks they came from,
+    /// and "Gyütö" is the quality a listener has an opinion about.
+    ///
+    /// Deliberately *not* cleared when a single tone moves register. Flow does that
+    /// every couple of minutes, and what makes a voicing that voicing is which
+    /// intervals it uses and how they sit relative to each other — which a register
+    /// crossfade keeps. Clearing on it would leave the label nil most of the time
+    /// and this trait would never learn anything. Letting go of everything does
+    /// clear it, because then the voicing genuinely isn't sounding any more.
+    @Published public private(set) var voicing: Voicing?
+    /// Set while `apply` is laying a stack down, so its own `fadeAll`/`sound` calls
+    /// don't clear the label it is about to set.
+    private var applyingVoicing = false
+
+    // MARK: Taste
+
+    /// What the listener likes, learned from the thumbs. Defaults to an in-memory
+    /// database that never persists and never biases anything — the app hosts hand
+    /// in a real store.
+    public let taste: Taste
+
     // MARK: Pulse
 
     /// The clock and the four arpeggiators. Runs off the main thread; it is
@@ -199,8 +223,11 @@ public final class ThrumModel: ObservableObject {
 
     private var statusResetWork: DispatchWorkItem?
 
-    public init(engine: DroneEngine) {
+    /// `taste` is optional rather than defaulted to `Taste()` because a default
+    /// argument is evaluated in the caller's context, which is not this actor.
+    public init(engine: DroneEngine, taste: Taste? = nil) {
         self.engine = engine
+        self.taste = taste ?? Taste()
         pulse = PulseCore(engine: engine)
         values = Self.specs.map { $0.range.lowerBound }
         // Seed from the engine's own defaults.
@@ -541,6 +568,7 @@ public final class ThrumModel: ObservableObject {
 
     public func fadeAll(quick: Bool = false) {
         for i in 0..<Harmony.padCount { padOn[i] = false }
+        if !applyingVoicing { voicing = nil }
         engine.fadeAll(seconds: quick ? 1.2 : nil)
         pulseChanged()
         show(quick ? "Letting go — 1.2 s" : "Letting go…")
@@ -548,6 +576,7 @@ public final class ThrumModel: ObservableObject {
 
     public func panic() {
         for i in 0..<Harmony.padCount { padOn[i] = false; padLevel[i] = 0 }
+        voicing = nil
         engine.panic()
         // Panic is the emergency key: it stops the clock too.
         pulseRunning = false
@@ -601,6 +630,8 @@ public final class ThrumModel: ObservableObject {
     }
 
     public func apply(_ voicing: Voicing) {
+        applyingVoicing = true
+        defer { applyingVoicing = false }
         fadeAll()
         let deg = harmony.mode.degrees
         var picks: [(pad: Int, level: Double)] = []
@@ -722,6 +753,7 @@ public final class ThrumModel: ObservableObject {
         var levels: [Int: Double] = [:]
         for p in picks { levels[p.pad] = max(levels[p.pad] ?? 0, p.level) }
         for pad in levels.keys.sorted() { sound(pad: pad, level: levels[pad]!) }
+        self.voicing = voicing
         show("\(voicing.rawValue) — \(voicing.detail)")
     }
 

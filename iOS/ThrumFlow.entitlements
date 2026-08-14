@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Granted by Apple on review at developer.apple.com/carplay (app type:
+	     Audio). Attached only when building with CARPLAY=1, because a profile
+	     cannot carry an entitlement the account has not been granted — leaving it
+	     on unconditionally would break device and TestFlight builds until the
+	     request is approved. -->
+	<key>com.apple.developer.carplay-audio</key>
+	<true/>
+</dict>
+</plist>

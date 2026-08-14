@@ -4,3 +4,7 @@ Thrum.xcodeproj/
 *.xcworkspace
 .DS_Store
 *.wav
+build-ios/
+build-sim/
+build-ipad/
+build-device/

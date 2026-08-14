@@ -39,7 +39,94 @@ on its own — every control is in the window.
 ./build.sh notarize   Release → Developer ID sign → notarize → dist/Thrum-<ver>.zip
                       → docs/appcast.xml
 ./build.sh appcast    Regenerate docs/appcast.xml from the existing zip
+./build.sh testflight ThrumFlow (iOS/iPadOS) → archive → App Store IPA
 ```
+
+There are two targets. **Thrum** is the Mac instrument. **ThrumFlow** is the passive
+iOS/iPadOS build — the same engine with Flow playing it and a Metal field showing
+what it's doing, no instrument surface at all. Both share `Shared/` verbatim; only
+`AudioRoute` is platform-split, since macOS reconstructs the route from a CoreAudio
+transport code and iOS just asks `AVAudioSession`. One build covers iPhone and iPad
+(`TARGETED_DEVICE_FAMILY "1,2"`), so there is no separate iPadOS target.
+
+Installing on a device needs no Xcode GUI and no cable if the phone is paired over
+Wi-Fi — Developer Mode on, an *Apple Development* certificate (separate from the
+Developer ID used for notarising), then:
+
+```
+xcodebuild -project Thrum.xcodeproj -scheme ThrumFlow -sdk iphoneos \
+  -destination 'generic/platform=iOS' -allowProvisioningUpdates build
+xcrun devicectl device install app --device <id> <path>/ThrumFlow.app
+```
+
+Use `generic/platform=iOS`, not a specific device: a device destination fails with
+"developer disk image could not be mounted", which looks like an SDK-version problem
+and isn't. The real error is `kAMDMobileImageMounterDeviceLocked` — **unlock the
+phone.** Reading the device log needs USB *and* admin, and `log` may be shadowed in
+your shell, so use `/usr/bin/log`.
+
+### TestFlight
+
+`./build.sh testflight` archives, exports an App Store IPA to `dist/ios/`, validates
+it, and uploads. Signing is Cloud Managed, so Apple holds the distribution
+certificate and none of your local certificate slots is spent.
+
+Credentials come from the environment and either kind works:
+
+```sh
+export ASC_APPLE_ID="you@example.com"        # your Apple ID email; not a secret
+
+# Once, ever — the password then lives in the keychain and build.sh finds it:
+xcrun altool --store-password-in-keychain-item --item thrum-asc \
+  -u "$ASC_APPLE_ID" -p abcd-efgh-ijkl-mnop   # --item is required; altool's usage omits it
+
+# …or an API key instead, with the .p8 in ~/.appstoreconnect/private_keys/
+export ASC_KEY_ID=<id> ASC_ISSUER_ID=<uuid>
+```
+
+The app-specific password comes from
+[appleid.apple.com](https://appleid.apple.com) → Sign-In and Security →
+App-Specific Passwords — **not** App Store Connect. It is per Apple ID rather than
+per app, so one made for another project works here unchanged; `build.sh` probes a
+few likely keychain item names for exactly that reason.
+
+**Apple shows that password once and it can never be retrieved** — not from the
+website, not from anywhere. Store it at the moment you create it or you will be
+generating another one. `ASC_APP_PASSWORD` in the environment still works and takes
+precedence, but the keychain keeps it out of your shell history.
+
+With no credentials at all it still archives, exports and stops with the IPA on
+disk, which is the useful half of a dry run.
+
+**The one thing that can't be scripted** is the App Store Connect app record, at
+[appstoreconnect.apple.com/apps](https://appstoreconnect.apple.com/apps): the API has
+no create-app endpoint. One web visit, once, bundle id `com.jeffhobbs.thrumflow`.
+
+Every upload needs a build number App Store Connect has not seen, and it rejects a
+repeat *after* the upload and a processing wait. Bump `CURRENT_PROJECT_VERSION`, or
+pass one: `./build.sh testflight $(date +%s)` sidesteps the bookkeeping entirely.
+
+Two declarations that gate uploads rather than merely warning:
+
+- `ITSAppUsesNonExemptEncryption` is `false` in `project.yml`, so export compliance
+  doesn't ask on every build.
+- **`iOS/PrivacyInfo.xcprivacy` is required, not optional.** Flow persists
+  `flow.lastKey` to UserDefaults so a relaunch can't open in the key the last session
+  used, and UserDefaults is a required-reason API — an upload with no declaration
+  gets ITMS-91053. The manifest declares that one category with reason `CA92.1` and
+  nothing else, because nothing is collected and nothing leaves the device. Add to it
+  if the target ever reads file timestamps, disk space, boot time or the active
+  keyboard. It is not needed for the Mac app, which ships Developer ID rather than
+  through the store.
+
+`altool --validate-app` runs before every upload on purpose: it catches that whole
+ITMS-9xxxx family in about a minute, against finding out by email a quarter of an
+hour later.
+
+The iOS app icon is a *separate* catalog from the Mac one and that's deliberate: iOS
+refuses any alpha channel (ITMS-90717) and masks its own corners, where the macOS icon
+is an inset tile with rounded corners baked in. `Tools/icon --ios` renders the
+full-bleed opaque variant.
 
 Requires Xcode and `xcodegen`. macOS 14+.
 
@@ -440,6 +527,152 @@ is often a better patch than the one you started from.
 
 ---
 
+## The transport (ThrumFlow)
+
+One tap on the ☯ starts a session, and that is the last time you see it. From then on
+the centre control is **play/pause** — because pausing is not un-starting, and putting
+the ☯ back would be offering to begin something already under way.
+
+Pause holds the journey rather than ending it. `AVAudioEngine.pause()` keeps the render
+graph and every node's state intact, so resuming picks the voices up mid-envelope;
+`stop()` tears that state down and comes back to silence that has to be rebuilt. Flow's
+clock stops with it, so a fifty-second slide that was thirty seconds in is still thirty
+seconds in when the sound returns — **wall-clock time passing while nothing is audible
+is not time this instrument has lived through.** It is deliberately not a fade: letting
+go is what stopping does, and swelling every voice back in would be an event at both
+ends.
+
+**Interruptions pause and resume by themselves.** Siri reading a message, a phone call,
+a timer: the engine and Flow's clock stop together and come back where they left off.
+This used to be empty — the `.began` case did nothing on the grounds that the session
+was already gone — which meant the graph was still nominally running through the
+interruption, so the recovery path saw `audio.isRunning == true` and declined to
+restart anything. The drone never came back.
+
+`.shouldResume` is advisory and frequently absent for a notification read aloud.
+Honouring it strictly is right for a music player, where the listener may have moved
+on, and wrong for a drone deliberately left running in a room — so what decides it here
+is our own record of whether an interruption is what stopped us. A pause you asked for
+is never undone by Siri finishing a sentence.
+
+Play and pause mean the same thing everywhere: on screen, on the lock screen, in
+Control Centre and in the car. Pause was once wired straight to `stop()`, which faded
+every voice and ended the session, so pressing play afterwards began a whole new
+journey in a different key.
+
+---
+
+## Taste — the thumbs (ThrumFlow)
+
+The iOS app has two more controls either side of play/pause: **thumbs up** and **thumbs
+down**. Both also appear in the car, on `CPNowPlayingTemplate`.
+
+On the **lock screen** they arrive in disguise, and that is the API's doing rather
+than a choice. `MPFeedbackCommand` is the only rating control Now Playing has: iOS
+draws its `like` as a **★**, and gives its `dislike` no slot at all. So the lock
+screen is **★ = more like this**, and **⏭ = less like this**.
+
+Repurposing ⏭ is normally a bad idea, but the usual objection doesn't apply: there
+is no next track in a continuous drone, so ⏭ has no honest meaning to displace —
+and what it means to a listener, *"enough of this one, move along"*, is exactly what
+a thumbs-down does. It routes through the same `moveOn` as the on-screen button, so
+it still changes one quality under the nine-second breath; nothing reached from the
+lock screen arrives more abruptly than Flow's own gestures. What is lost is
+discoverability, and it can't be bought back: `localizedTitle` is a
+`MPFeedbackCommand` property, not an `MPRemoteCommand` one, so a transport button
+cannot be relabelled — it draws as ⏭ and reads as "Next Track" to VoiceOver.
+
+The car gets **both** — the real 👍 👎 glyphs on `CPNowPlayingTemplate`, *and* the
+same ⏭ mapping, which is the control a driver's hand already knows where to find.
+
+Everything else in the transport is explicitly disabled, including
+`skipForward`/`skipBackward` — they default to *enabled* and are what iOS falls back
+to drawing for a live stream, so leaving them alone put two dead ⏪ ⏩ on the lock
+screen of something with nowhere to seek to. Disabling next/previous is not enough
+on its own.
+
+Two labelled thumbs on the lock screen itself would need a Live Activity with
+interactive App Intent buttons — a widget extension, a new target and a new signing
+surface. Not done.
+
+They are not a rating of a track — there is no track. Over months they change what
+Flow chooses.
+
+**The hard part is not storing the votes, it is deciding what they were about.** A
+thumbs-up arrives with no explanation, and at that moment thirty things are true of
+the drone at once: a key, a mode, a temperament, a timbre, a voicing and two dozen
+sliders. So a vote is not recorded against "the drone" — there is no such object to
+keep — but spread across *every quality that was audible when it was cast*. One vote
+says almost nothing. Fifty say a great deal, because the qualities that keep turning
+up in liked drones accumulate, while the ones that were merely along for the ride
+appear on both sides of the ledger and cancel. Nothing is ever interpreted; the noise
+is left to average itself out.
+
+What that buys, per kind of quality:
+
+- **Discrete things** — key, mode, temperament, timbre, voicing — get a smoothed
+  score from their up and down weight, which becomes a multiplier on Flow's draw. A
+  liked mode comes up about twice as often; a disliked timbre about a third as often.
+- **Continuous controls** — every slider Flow drives — learn *where* you like them.
+  Flow's roam band for that control is narrowed toward the middle of your liked
+  settings and away from your disliked ones.
+
+Four rules it holds to, each of which could have gone the other way:
+
+- **Nothing is ever ruled out.** Every weight has a floor, so a disliked timbre
+  becomes rare rather than unreachable. A catalogue pruned to a favourite handful is
+  a worse instrument even if everything left in it scores well — and a trait that can
+  never be chosen can never be re-rated, so a hard exclusion is also permanent.
+- **An untaught Taste is invisible.** Every weight is exactly 1.0 and every roam band
+  comes back exactly as it went in. A fresh install behaves identically to the app
+  before any of this existed.
+- **It never stops moving.** A learned band is never narrower than a third of the one
+  it replaced, always stays inside Flow's own pleasant range — a hundred thumbs-up
+  cannot push Presence Cut below its anti-fatigue floor — and one drift in six
+  ignores what has been learned entirely. That last one is not a hedge: a control
+  kept inside its learned band never gets heard anywhere else, so it never gets rated
+  there, so the band could only ever tighten.
+- **Old votes fade**, on a 150-day half-life. Taste in a drone is not a fact about a
+  person, it is where they are this year.
+
+**The two thumbs are deliberately not symmetrical** in what they do to the sound,
+only in what they teach:
+
+- **Thumbs-up changes nothing.** It is filed, and that is all. An earlier version
+  pushed the disruptive gestures out so a praised drone would last longer; it was
+  wrong for a reason worth keeping written down. Saying you like something should
+  not be a thing you think twice about pressing. The moment approving of a drone
+  also silently rearranges it, the button has a cost — and a rating button with a
+  cost gets used less and teaches less. There is a test that holds it to this.
+- **Thumbs-down brings the next change forward.** Not a new or special change:
+  whichever one Flow had already planned next, simply sooner. That keeps every
+  transition on the rails it was always going to run on — the crossfade in `apply`,
+  the glide in `setMode`, the nine-second breath around a timbre — and means the
+  button can never invent an event of its own. What arrives is still shaped by the
+  vote, because every choice Flow makes is weighted by taste. Measured: it changes
+  the drone's character 40 times out of 40, on average 3.6 seconds later, and ten
+  impatient presses in a row do not stack up a queue of changes.
+
+That second one has a consequence worth knowing about. Flow's four "change the
+character" gestures now **always land on something different from what is sounding**.
+A weighted draw over eight timbres picks the current one about an eighth of the time,
+and a change-the-timbre gesture that changes it to itself is one that quietly did
+nothing — invisible when it only fired on its own timer, and a button press producing
+silence once thumbs-down can pull it forward.
+
+**The key is the exception**, and for the reason the rest of Flow is built on: it is
+never moved mid-session, so a thumbs-down cannot move it either. A disliked key is
+still recorded, and acted on where it can be — the next session opens somewhere else.
+
+The line under the buttons says what has been learned so far ("leaning toward Gyütö,
+Lydian · away from Glass Choir"), or how many ratings it is still waiting on.
+Long-press it to forget everything. The database is a JSON file at
+`Library/Application Support/Thrum/taste.json`; the Mac app deliberately gets an
+in-memory one that learns nothing, so the offline harnesses keep measuring Flow
+rather than Flow plus whatever was liked last week.
+
+---
+
 ## Spatial — the drone around you
 
 Sixteen mono buses placed around your head and rendered binaurally, instead of
@@ -457,6 +690,15 @@ at four speeds.
 listener, so the drone stays where it is in the room when you turn your head.
 **Recenter** (`⌥⌘R`) takes wherever you are looking as straight ahead — AirPods
 yaw drifts, so this is the button you will actually use.
+
+Recenter earns its keep for a second reason. "Straight ahead" is captured the
+moment tracking starts, so if you were looking down at the screen at the time,
+every angle afterwards is measured from there — and a head that is nodding
+around 60° of *relative* pitch is much closer to vertical than it feels. That
+used to matter a great deal: tilting through vertical made the field lurch, and
+Thrum heard it as a real head movement. It no longer does, because the transport
+carries the rotation itself rather than three Euler angles — see
+[Head tracking is a rotation, not three numbers](#head-tracking-is-a-rotation-not-three-numbers).
 
 Two things to get right or it won't sound like anything:
 
@@ -576,11 +818,94 @@ swiftc -O -o /tmp/thrumflow \
 It earned its keep immediately: it caught the preset tempo arriving as a 23% jump
 and a two-second fade that was quicker than the mode's own floor.
 
+`Tools/taste/` is the thumbs' harness, and it exists because a preference system is
+unusually easy to get wrong in a way nobody notices — the failure mode is not a
+crash, it is an app that claims to be learning and either isn't, or is over-learning
+so hard it plays one drone forever. Both sound plausible from the sofa. So it teaches
+a simulated listener's opinions to a real `Taste`, runs real Flow against it, and
+counts what comes out: that an untaught database returns every weight as exactly 1.0
+and every roam band untouched; that a liked mode's share of Flow's time rises (10.7%
+→ 22.5%) and a disliked timbre's falls (10.5% → 7.0%); that eighteen hours of Flow
+still visits all eight restful modes, twelve voicings and the disliked timbre; that a
+learned band stays inside Flow's range and never collapses; that Flow still wanders
+outside it; that thumbs-up measurably reduces upheaval and thumbs-down always changes
+something within thirty seconds *without ever moving the key*; that old votes fade and
+six recent ones can overturn fifteen old ones; and that the file round-trips.
+
+```sh
+swiftc -O -o /tmp/thrumtaste Shared/*.swift \
+  Tools/spatial/ablholder.swift Tools/taste/main.swift
+/tmp/thrumtaste
+```
+
+It also checks the transport: that pausing is a state of a *running* session rather
+than a stopped one, that nothing drifts through ten minutes of paused time, that the
+drone is the same one when it comes back, and that resuming keeps the session's key —
+which is the difference between resume and restart, and the bug that was on the lock
+screen.
+
+Two of those found real defects the moment they were written. `advance()` drove
+`tick()` straight past the pause check, so pause was a property of the timer rather
+than of the director; and the check for "thumbs-down always changes something" caught
+that the voicing gesture sometimes swells in one extra tone instead of rebuilding the
+stack — audible, but invisible to a comparison that only looked at the four named
+qualities, which would have reported a working button as broken.
+
 `Tools/axis/` measures `AVAudioEnvironmentNode`'s sign conventions by asking which
 ear a single source lands in. Do not derive these by hand: positive listener yaw
 turns the listener *clockwise*, the opposite handedness from CoreMotion, and
 getting it wrong makes head tracking swing the wrong way while still looking
 correct in the readout.
+
+### Head tracking is a rotation, not three numbers
+
+For several versions Thrum smoothed and rate-limited `CMAttitude`'s `yaw`, `pitch`
+and `roll` as three independent signals. They are not independent. CMAttitude
+reports Tait-Bryan angles in Z-X-Y order, so **pitch is the middle axis**, and as
+pitch approaches ±90° yaw and roll stop being separable — the same physical
+rotation can be written with wildly different pairs of them.
+
+ThrumFlow's flight recorder caught the consequence on a hike: yaw and roll taking
+equal-magnitude steps of up to **168° in a single 20 ms sample**, agreeing with
+each other to within 0.02%, while pitch moved at an ordinary 240°/s. On the very
+same lines `overruns` was 0 and the motion stream was a perfect 50 Hz, so neither
+the render path nor Bluetooth was involved. The rotation was smooth the whole
+time; only its decomposition was degenerate.
+
+The reason it was *audible* is the guard that was supposed to prevent exactly this
+kind of thing. `maxDegreesPerSecond` caught the 168° phantom step and paid it out
+at 400°/s, so instead of one click the entire sixteen-bus field swept 168° over
+nearly half a second and swept back — heard as a warble, worst in the high end
+where elevation is carried by pinna notches at 5–10 kHz. A limiter doing its job
+on a lie is indistinguishable from a DSP bug.
+
+The transport now carries a quaternion: `CMAttitude.quaternion` in, `simd_slerp`
+for the one-pole, geodesic rate for the limit, and `listenerVectorOrientation`
+out, so no Euler angle is formed anywhere between the sensor and the node. Three
+things worth not re-deriving:
+
+- **The handedness fix is a pure change of frame.** The long-standing
+  `(-yaw, -pitch, -roll)` is exactly a 180° rotation about (0, 1, 1)/√2, which
+  sends CoreMotion's (right, forward, up) onto the node's (−x, z, y). It is now one
+  conjugation in `HeadSmoother.toListener` rather than a negation in each host.
+- **Ask the node rather than the documentation.** Setting
+  `listenerAngularOrientation` and reading `listenerVectorOrientation` back makes
+  `AVAudioEnvironmentNode` state its own mapping: `Ry(−yaw)·Rx(pitch)·Rz(−roll)`.
+  That is how the frame change above was derived, how the equivalence was proved to
+  Float32 epsilon across 400 random combined rotations — which is what makes this
+  safe to ship into an app whose spatial image was tuned by ear — and how
+  CMAttitude's Euler order was identified as Z-X-Y (the only one of six that
+  matched).
+- **The rate in the flight log is one number now, not three.** Per-axis rates were
+  a property of the chart, not of the head, which is why they read 8352°/s during
+  an ordinary walk. `clamped` staying at zero through a session that used to warble
+  is the check that the fix took.
+
+`Tools/spatial` drives the whole trajectory offline, and — following the lesson
+below — first asserts that the test trajectory *does* contain the bug: the head
+turns 60° in total while its Euler angles jump 180° in one sample. A version of
+this check that measured Euler angles rather than the vectors the node is driven
+with would have called the artifact a real movement, and the fix a regression.
 
 Two lessons from this suite that cost real time:
 
@@ -636,11 +961,20 @@ Shared/   Tuning       temperaments and pitch-class tables
           Cathedral    the FDN reverb
           Pulse        tempo, tap tempo, the four arpeggiator lanes
           Spatial      the ring geometry, and AirPods head tracking
+          AudioRoute   what the output actually is; the only per-platform file
           Flow         the director that plays the instrument itself
+          Taste        what the thumbs have taught, and how Flow leans on it
           ThrumModel   instrument state; the only writer to the engine
-App/      ThrumApp     AVAudioEngine host
+App/      ThrumApp     AVAudioEngine host                        (macOS)
           ThrumView    the interface
           MIDISurface  shared CoreMIDI plumbing
           LaunchpadController
           LaunchControlController
+iOS/      ThrumFlowApp the scene, and FlowHost.shared            (iOS/iPadOS)
+          FlowHost     AVAudioSession host, Now Playing, the thumbs' entry point
+          FlowView     start, stop, two thumbs, and nothing else
+          Visualizer   the Metal field
+          Shaders      its fragment shader
+          FieldArtwork the same field in Core Graphics, for the car
+          CarPlay      the templates
 ```

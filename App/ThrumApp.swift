@@ -97,18 +97,22 @@ final class ThrumHost: ObservableObject {
 
         model.onSpatialChange = { [weak self] on in self?.setSpatial(on) }
         model.onFieldChange = { [weak self] in self?.scheduleFieldUpdate() }
-        // Negated, and that is the whole ballgame. Measured with Tools/axis:
-        // `AVAudio3DAngularOrientation` treats positive yaw and roll as turning
-        // the listener *clockwise* — yaw +90° moves a source that was ahead into
-        // the left ear — whereas CoreMotion's attitude is right-handed, so a head
-        // turning left reports positive yaw. Passed straight through, the field
-        // swings the wrong way and reads as "head tracking, but not right".
+        // Vectors, not angles — and the handedness reconciliation that used to live
+        // here as three negations now lives in `HeadSmoother.toListener`, which is
+        // the same rotation expressed once and testable. It has to be reconciled
+        // somewhere: measured with Tools/axis, `AVAudio3DAngularOrientation` treats
+        // positive yaw and roll as turning the listener *clockwise* — yaw +90° moves
+        // a source that was ahead into the left ear — whereas CoreMotion's attitude
+        // is right-handed, so a head turning left reports positive yaw. Passed
+        // straight through, the field swings the wrong way and reads as "head
+        // tracking, but not right".
         //
-        // The listener has to rotate the same way the head does for world-fixed
-        // sources to stay put, so the two conventions have to be reconciled here.
-        model.head.onOrientation = { [weak self] yaw, pitch, roll in
-            self?.environment.listenerAngularOrientation =
-                AVAudio3DAngularOrientation(yaw: Float(-yaw), pitch: Float(-pitch), roll: Float(-roll))
+        // Driving `listenerVectorOrientation` also means no Euler angle is formed
+        // anywhere between the sensor and the node, which is what stopped the field
+        // lurching when a listener's relative pitch crossed vertical. See
+        // `HeadSmoother`.
+        model.head.onOrientation = { [weak self] head in
+            self?.environment.listenerVectorOrientation = head.orientation
         }
 
         // Both land on the same place; the route changes on its own when the

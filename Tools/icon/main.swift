@@ -4,21 +4,37 @@ import CoreGraphics
 // Draws Thrum's icon: concentric rings radiating from a warm core, each one
 // slightly off-centre from the last, so the whole thing reads as a standing
 // wave that never quite closes — which is the sound.
+//
+//   swiftc -O -o /tmp/thrumicon Tools/icon/main.swift
+//   /tmp/thrumicon out.png          macOS: inset tile, rounded corners, alpha
+//   /tmp/thrumicon out.png --ios    iOS:   full-bleed square, fully opaque
+//
+// The two platforms want opposite things and getting it wrong is a rejection
+// rather than a taste question. macOS icons carry their own rounded corners and
+// a transparent margin, so the tile floats. iOS masks the corners itself and
+// **refuses any alpha channel at all** (ITMS-90717), so the artwork has to run
+// edge to edge and be flattened. Re-rendering is cleaner than compositing the
+// Mac icon onto a background: no resampling, no halo where the old corners were.
 
+let iOS = CommandLine.arguments.contains("--ios")
 let size = 1024
 let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/tmp/thrum-icon.png"
 
 let cs = CGColorSpaceCreateDeviceRGB()
+// `noneSkipLast` on the iOS path: no alpha channel in the output at all, which
+// is the requirement — not merely "alpha set to 1 everywhere".
 guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
                           bytesPerRow: 0, space: cs,
-                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                          bitmapInfo: (iOS ? CGImageAlphaInfo.noneSkipLast
+                                           : CGImageAlphaInfo.premultipliedLast).rawValue) else {
     fatalError("no context")
 }
 
 let s = CGFloat(size)
-let inset = s * 0.055
+let inset = iOS ? 0 : s * 0.055
 let rect = CGRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
-let radius = rect.width * 0.225
+// Full-bleed and square on iOS; the system rounds it.
+let radius = iOS ? 0 : rect.width * 0.225
 
 // Rounded-rect background, deep plum with a lift toward the top.
 let path = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)

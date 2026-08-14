@@ -1,7 +1,9 @@
 import Foundation
 import AVFoundation
 import Combine
+#if os(macOS)
 import CoreAudio
+#endif
 
 /// What Thrum's sound is currently coming out of, and therefore how the spatial
 /// field should be rendered.
@@ -20,6 +22,12 @@ import CoreAudio
 /// and zero of them present in CoreAudio — and the one public API that speaks
 /// AirPlay, `AVRoutePickerView`, routes an `AVPlayer` and cannot carry an
 /// `AVAudioEngine`. So: let the system route, and read the result.
+///
+/// The two platforms answer the same question from opposite ends. macOS has to
+/// reconstruct the route from the default device's transport four-char code;
+/// iOS just says `.headphones` or `.builtInSpeaker` outright, via
+/// `AVAudioSession`. Everything downstream of `Kind` — the HRTF mapping, the
+/// latency warning — is shared, and only the detection is per-platform.
 @MainActor
 public final class AudioRoute: ObservableObject {
     public enum Kind: Equatable {
@@ -38,7 +46,11 @@ public final class AudioRoute: ObservableObject {
     /// environment node.
     public var onChange: (() -> Void)?
 
+#if os(macOS)
     private var listeners: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+#elseif os(iOS)
+    private var observers: [NSObjectProtocol] = []
+#endif
 
     public init() {
         refresh()
@@ -92,14 +104,19 @@ public final class AudioRoute: ObservableObject {
 
     // MARK: Reading it
 
-    public func refresh() {
-        let id = Self.defaultOutputID()
-        let newName = Self.string(id, kAudioObjectPropertyName) ?? ""
-        let newKind = Self.kind(of: id, name: newName)
+    private func adopt(name newName: String, kind newKind: Kind) {
         guard newKind != kind || newName != name else { return }
         name = newName
         kind = newKind
         onChange?()
+    }
+
+#if os(macOS)
+
+    public func refresh() {
+        let id = Self.defaultOutputID()
+        let newName = Self.string(id, kAudioObjectPropertyName) ?? ""
+        adopt(name: newName, kind: Self.kind(of: id, name: newName))
     }
 
     /// There is no "headphones" transport type. Wired headphones appear as a
@@ -184,4 +201,51 @@ public final class AudioRoute: ObservableObject {
         }
         listeners.removeAll()
     }
+
+#elseif os(iOS)
+
+    /// iOS states the route outright, which is the whole difference between the
+    /// two platforms here — no transport codes to decode, no device list to scan.
+    public func refresh() {
+        let route = AVAudioSession.sharedInstance().currentRoute
+        guard let out = route.outputs.first else {
+            adopt(name: "", kind: .unknown)
+            return
+        }
+        adopt(name: out.portName, kind: Self.kind(of: out.portType))
+    }
+
+    private static func kind(of port: AVAudioSession.Port) -> Kind {
+        switch port {
+        case .headphones:
+            return .headphones
+        case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE:
+            return .bluetooth
+        case .builtInSpeaker, .builtInReceiver:
+            return .builtInSpeakers
+        case .airPlay:
+            return .airPlay
+        default:
+            // USB, HDMI, line out, car audio — all a room rather than a pair of
+            // ears, which is the only distinction the HRTF stage cares about.
+            return .external
+        }
+    }
+
+    private func watch() {
+        let centre = NotificationCenter.default
+        observers.append(centre.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        })
+    }
+
+    public func shutdown() {
+        for o in observers { NotificationCenter.default.removeObserver(o) }
+        observers.removeAll()
+    }
+
+#endif
 }

@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import simd
 
 // Offline checks for spatial mode. The whole point of this harness is that the
 // spatial path is a *second* master chain — per-bus EQ, a wet tail extracted by
@@ -7,8 +8,8 @@ import AVFoundation
 // that is audible as "wrong" until it is very wrong.
 //
 //   swiftc -O -o /tmp/thrumspatial \
-//     Shared/{Tuning,Harmony,Timbre,Events,Cathedral,DroneEngine}.swift \
-//     Tools/spatial/main.swift
+//     Shared/{Tuning,Harmony,Timbre,Events,Cathedral,DroneEngine,Spatial,AudioRoute}.swift \
+//     Tools/spatial/*.swift
 //   /tmp/thrumspatial
 
 let sr = 48000.0
@@ -347,6 +348,295 @@ do {
                  times, 100.0 / times))
     check(times > 3.0, "spatial worst case has headroom before the deadline",
           String(format: "%.1f×", times))
+}
+
+print("\n— the head-tracking transport —")
+
+// 6. `HeadSmoother` is the whole of what stands between a CoreMotion sample and
+// sixteen HRTFs being re-pointed, and until it was pulled out of `HeadTracker` none
+// of it could be tested at all: it was reachable only through a `CMAttitude`, which
+// has no public initialiser. These drive it with a synthetic head instead.
+//
+// The reason to care is a listener report — "warble when I tilt my head up and
+// down, worst on the higher voices" — that survived three offline measurements of
+// the render path. `Tools/warble` established that AVAudioEnvironmentNode is not at
+// fault: it crossfades its filter hand-overs (boundary roughness 1.00× interior at
+// every frequency tried) and snaps no harder in elevation than azimuth. So the
+// suspect is what we hand it, and a discontinuity in an Euler angle is the one thing
+// on this path that is intermittent, axis-specific, and loudest in the high band —
+// because a large step re-points every source at once and elevation is encoded in
+// pinna notches at 5–10 kHz.
+do {
+    /// Feed a trajectory in and report what came out.
+    func run(_ samples: [(Double, Double, Double)], dt: Double = 0.04)
+    -> (out: [AVAudio3DVectorOrientation], clamped: Int, peak: Double) {
+        var s = HeadSmoother()
+        var out: [AVAudio3DVectorOrientation] = []
+        var clamped = 0, peak = 0.0
+        for (y, p, r) in samples {
+            let step = s.step(yaw: y, pitch: p, roll: r, dt: dt)
+            out.append(step.head.orientation)
+            if step.clamped { clamped += 1 }
+            peak = max(peak, step.rate)
+        }
+        return (out, clamped, peak)
+    }
+
+    /// How far the field actually turned between two frames, in degrees.
+    ///
+    /// Measured on the vectors the node is driven with rather than on Euler angles,
+    /// and that is the point: the whole bug was an Euler angle moving 168° while the
+    /// rotation it described moved a fraction of a degree. A test that measured the
+    /// angles would have reported the artifact as a real movement — and, run against
+    /// the fix, would report the fix as broken.
+    func fieldStep(_ a: AVAudio3DVectorOrientation, _ b: AVAudio3DVectorOrientation) -> Double {
+        func ang(_ u: AVAudio3DVector, _ v: AVAudio3DVector) -> Double {
+            let d = Double(u.x * v.x + u.y * v.y + u.z * v.z)
+            return acos(max(-1, min(1, d))) * 180 / .pi
+        }
+        return max(ang(a.forward, b.forward), ang(a.up, b.up))
+    }
+    /// The largest single-frame movement in the output, which is what the HRTF sees.
+    func biggestStep(_ v: [AVAudio3DVectorOrientation]) -> Double {
+        var worst = 0.0
+        for i in 1..<v.count { worst = max(worst, fieldStep(v[i - 1], v[i])) }
+        return worst
+    }
+
+    // An ordinary nod: ±20° at 0.4 Hz, which is looking down at the phone and back.
+    // Nothing here should ever engage the limit — if it did, the limit would be a
+    // tone control rather than a guard.
+    let nod = (0..<200).map { i -> (Double, Double, Double) in
+        (0, 20 * sin(2 * .pi * 0.4 * Double(i) * 0.04), 0)
+    }
+    let nodded = run(nod)
+    check(nodded.clamped == 0, "an ordinary nod is never rate-limited",
+          "peak input \(Int(nodded.peak))°/s")
+    // The rate the recorder reports has to be the head's, not the smoother's lag —
+    // it is the one number that says whether a stream is physically possible, and it
+    // is useless if ordinary movement already reads as impossible. A ±20° nod at
+    // 0.4 Hz peaks at 2π·0.4·20 ≈ 50°/s.
+    check(nodded.peak > 40 && nodded.peak < 60,
+          "and the rate it reports is the head's own, not the tracking error",
+          String(format: "%.0f°/s for a nod that peaks at 50", nodded.peak))
+    check(biggestStep(nodded.out) < 2, "and moves the field in small steps",
+          String(format: "largest %.2f° per frame", biggestStep(nodded.out)))
+
+    // A fast deliberate turn — 300°/s, faster than anyone looks around — still must
+    // not be limited, or the field lags the head exactly when it is most obvious.
+    let fast = (0..<40).map { i -> (Double, Double, Double) in (300 * Double(i) * 0.04, 0, 0) }
+    check(run(fast).clamped == 0, "so is a 300°/s turn of the head")
+
+    // The bug this fixes. Roll used to get neither the wrap nor the shortest way
+    // round, so a head tilted far enough to take CoreMotion's roll from +179° to
+    // −179° handed the one-pole a 358° error and it set off the long way, sweeping
+    // the whole field through every azimuth on its way to a destination 2° away.
+    var held = HeadSmoother()
+    for _ in 0..<80 { _ = held.step(yaw: 0, pitch: 0, roll: 179, dt: 0.04) }
+    check(abs(held.roll - 179) < 1, "roll settles where it was told to",
+          String(format: "%.1f°", held.roll))
+    var travelled = 0.0
+    var previous = held.orientation
+    for _ in 0..<40 {
+        let s = held.step(yaw: 0, pitch: 0, roll: -179, dt: 0.04)
+        travelled += fieldStep(previous, s.head.orientation)
+        previous = s.head.orientation
+    }
+    check(travelled < 10, "and crossing ±180° takes the short way, not 358° of field",
+          String(format: "travelled %.1f°", travelled))
+
+    // Any discontinuity at all — a re-seated reference, a resumed Bluetooth batch —
+    // is spread over several frames instead of arriving as one event.
+    var jumped = HeadSmoother()
+    for _ in 0..<60 { _ = jumped.step(yaw: 0, pitch: 0, roll: 0, dt: 0.04) }
+    var worst = 0.0, previousFacing = jumped.orientation
+    for _ in 0..<40 {
+        let s = jumped.step(yaw: 0, pitch: 90, roll: 0, dt: 0.04)
+        worst = max(worst, fieldStep(previousFacing, s.head.orientation))
+        previousFacing = s.head.orientation
+    }
+    check(worst <= HeadSmoother.maxDegreesPerSecond * 0.04 + 0.001,
+          "a 90° step is delivered as a glide, not a lurch",
+          String(format: "largest %.1f° per frame, was %.1f before the limit",
+                 worst, 90 * HeadSmoother.coefficient(for: 0.04)))
+    check(abs(jumped.pitch - 90) < 5, "and still arrives",
+          String(format: "%.1f°", jumped.pitch))
+
+    // The smoothing has to be a *time*, not a per-sample coefficient.
+    //
+    // This is the check that would have caught the real bug. The old smoother
+    // multiplied the error by a bare 0.28 every sample, which is only the intended
+    // ~120 ms if the sensor delivers 25 Hz — and ThrumFlow's flight recorder says
+    // AirPods Pro 2 deliver 50 Hz (`motion 1500/30s`, every session). So on the
+    // device the field settled in half the time it was tuned for, i.e. head movement
+    // reached sixteen HRTFs twice as twitchy as designed.
+    //
+    // Same head, same wall-clock, two sensor rates: the field must arrive in the same
+    // place at the same time. Half a second into a 30° turn a 120 ms one-pole is
+    // ~98% there, and the two rates must agree to well inside what an ear could tell.
+    func settle(after seconds: Double, dt: Double) -> Double {
+        var s = HeadSmoother()
+        for _ in 0..<Int(seconds / dt) { _ = s.step(yaw: 30, pitch: 0, roll: 0, dt: dt) }
+        return s.yaw
+    }
+    let at25 = settle(after: 0.5, dt: 0.04)
+    let at50 = settle(after: 0.5, dt: 0.02)
+    check(abs(at25 - at50) < 0.5,
+          "smoothing is a time constant, so the sensor's rate can't change the feel",
+          String(format: "%.2f° at 25 Hz vs %.2f° at 50 Hz", at25, at50))
+    // And it is still the time constant the original coefficient encoded, so this is
+    // a fix to the 50 Hz case rather than a retuning of the 25 Hz one.
+    check(abs(HeadSmoother.coefficient(for: 0.04) - 0.28) < 0.005,
+          "and 25 Hz still gets exactly the coefficient it was tuned with",
+          String(format: "%.3f", HeadSmoother.coefficient(for: 0.04)))
+
+    // 6a. The hike bug: relative pitch crossing vertical.
+    //
+    // A smooth physical rotation carrying the head through pitch = 90° — which is
+    // what an ordinary nod does once the reference was captured while looking down at
+    // the phone. The rotation never moves faster than a slow turn, but CMAttitude's
+    // Z-X-Y decomposition of it has pitch as the middle axis, so yaw and roll flip by
+    // ~180° on the way through.
+    //
+    // The A/B matters more than the assertion here. This project has learned twice
+    // that a detector can pass for the wrong reason, so the test first proves the
+    // *input* is genuinely poisoned — if the raw Euler stream were smooth, everything
+    // below would pass on a trajectory that never contained the bug.
+    let crossing: [simd_quatd] = (0..<120).map { i in
+        let t = Double(i) / 119
+        let tilt = (60 + 60 * t) * .pi / 180        // 60° → 120° about the ear axis
+        return simd_quatd(angle: 20 * .pi / 180, axis: simd_double3(0, 0, 1))
+             * simd_quatd(angle: tilt, axis: simd_double3(1, 0, 0))
+    }
+    // Physically this is a 60° tilt over ~5 s: nothing, about 12°/s.
+    var trueTravel = 0.0
+    for i in 1..<crossing.count { trueTravel += HeadSmoother.angle(crossing[i - 1], crossing[i]) }
+    let eulers = crossing.map { HeadSmoother.euler($0) }
+    var rawJump = 0.0
+    for i in 1..<eulers.count {
+        rawJump = max(rawJump, abs(HeadSmoother.wrap(eulers[i].yaw - eulers[i - 1].yaw)))
+        rawJump = max(rawJump, abs(HeadSmoother.wrap(eulers[i].roll - eulers[i - 1].roll)))
+    }
+    check(trueTravel < 70 && rawJump > 100,
+          "the trajectory really does contain the bug (so the checks below mean something)",
+          String(format: "head turns %.0f° in total, its Euler angles jump %.0f° in one sample",
+                 trueTravel, rawJump))
+
+    // Now the fix. Both entry points have to survive it: the quaternion one the app
+    // uses, and the Euler convenience one — because recomposing CMAttitude's angles in
+    // its own Z-X-Y order *cancels* the degenerate split rather than inheriting it,
+    // and that is the load-bearing claim of this rewrite.
+    for (name, feed) in [("quaternion", true), ("Euler round-trip", false)] {
+        var s = HeadSmoother()
+        var out: [AVAudio3DVectorOrientation] = []
+        var clamped = 0, peakRate = 0.0
+        // Settle on the starting attitude first. Without this the measurement is
+        // dominated by the smoother gliding in from identity to a head already tilted
+        // 60°, which is a legitimate rate-limited arrival and not what is under test.
+        for _ in 0..<80 { _ = s.step(rotation: crossing[0], dt: 0.04) }
+        for (i, q) in crossing.enumerated() {
+            let step: HeadStep
+            if feed {
+                step = s.step(rotation: q, dt: 0.04)
+            } else {
+                let e = eulers[i]
+                step = s.step(yaw: e.yaw, pitch: e.pitch, roll: e.roll, dt: 0.04)
+            }
+            out.append(step.head.orientation)
+            if step.clamped { clamped += 1 }
+            peakRate = max(peakRate, step.rate)
+        }
+        check(clamped == 0 && peakRate < 200,
+              "crossing vertical is not a discontinuity — \(name)",
+              String(format: "%d frames limited, peak rate %.0f°/s (was 8352 on the hike)",
+                     clamped, peakRate))
+        check(biggestStep(out) < 3,
+              "and the field turns in small steps through it — \(name)",
+              String(format: "largest %.2f° per frame", biggestStep(out)))
+    }
+
+    // 6b. The rewrite must not have moved the field.
+    //
+    // The reason this is safe to ship into a notarized Mac app whose spatial image was
+    // tuned by ear: driving `listenerVectorOrientation` from a conjugated quaternion has
+    // to be *identical* to the `(-yaw, -pitch, -roll)` angular path it replaces. Rather
+    // than argue that from Apple's documentation, ask the node — setting an angular
+    // orientation and reading the vector one back makes it state its own mapping.
+    let env = AVAudioEnvironmentNode()
+    var worstVector = 0.0
+    var seed = 12345.0
+    func rnd() -> Double {
+        seed = (seed * 1103515245 + 12345).truncatingRemainder(dividingBy: 2147483648)
+        return seed / 2147483648
+    }
+    for _ in 0..<400 {
+        // Away from ±90° pitch, where the path being replaced was meaningful at all.
+        let y = (rnd() * 2 - 1) * 170, p = (rnd() * 2 - 1) * 60, r = (rnd() * 2 - 1) * 170
+        env.listenerAngularOrientation = AVAudio3DAngularOrientation(
+            yaw: Float(-y), pitch: Float(-p), roll: Float(-r))
+        let shipped = env.listenerVectorOrientation
+        let ours = HeadSmoother.listener(HeadSmoother.rotation(yaw: y, pitch: p, roll: r))
+        // Compared component by component, not as an angle: `acos` of a dot product
+        // near 1 amplifies Float32 rounding into a spurious ~0.03°, and the node stores
+        // these as Float, so an angular comparison here measures the storage rather
+        // than the mapping.
+        worstVector = max(worstVector, max(
+            max(abs(Double(shipped.forward.x - ours.forward.x)),
+                max(abs(Double(shipped.forward.y - ours.forward.y)),
+                    abs(Double(shipped.forward.z - ours.forward.z)))),
+            max(abs(Double(shipped.up.x - ours.up.x)),
+                max(abs(Double(shipped.up.y - ours.up.y)),
+                    abs(Double(shipped.up.z - ours.up.z))))))
+    }
+    check(worstVector < 1e-5,
+          "and it points the listener exactly where the angular path did",
+          String(format: "worst disagreement %.2e over 400 random rotations, on unit vectors",
+                 worstVector))
+}
+
+// MARK: - The gaze histogram
+//
+// Checked rather than trusted, because this is the instrument the 08-13 anomaly is
+// now resting on: a referenced gaze that spanned 179° in a twelve-minute walk, which
+// is more elevation than a neck has. If the histogram that reports it is wrong, the
+// anomaly is an artifact — and two harness bugs have already been found this week by
+// asking exactly that question one step too late.
+print("\n— the gaze histogram —")
+do {
+    var h = HeadTracker.TiltHistogram()
+    for v in [-80.0, -40, 0, 0, 0, 40, 80] { h.add(v) }
+    check(abs(h.lowest - -80) < 0.001, "keeps the lowest gaze it saw",
+          String(format: "%.1f", h.lowest))
+    check(abs(h.highest - 80) < 0.001, "and the highest",
+          String(format: "%.1f", h.highest))
+    check(abs(h.median) <= 2.5, "and finds the middle of a symmetric spread",
+          String(format: "median %.1f", h.median))
+
+    // The distinction the whole thing exists to draw: a head that sat craned upward
+    // must not read the same as one that was level and glanced up once.
+    var craned = HeadTracker.TiltHistogram()
+    for _ in 0..<100 { craned.add(78) }
+    craned.add(-5)
+    var level = HeadTracker.TiltHistogram()
+    for _ in 0..<100 { level.add(2) }
+    level.add(78)
+    check(craned.median > 70, "a head held craned reads as craned",
+          String(format: "median %.0f", craned.median))
+    check(abs(level.median) < 10, "a level head that glanced up once does not",
+          String(format: "median %.0f, high %.0f", level.median, level.highest))
+    check(abs(craned.highest - level.highest) < 0.001,
+          "though both report the same extreme — which is why the peak alone could not tell them apart")
+
+    // Saturation, since real gaze reaches the ends.
+    var ends = HeadTracker.TiltHistogram()
+    ends.add(-90); ends.add(90)
+    check(ends.lowest == -90 && ends.highest == 90, "the poles land in range, not out of bounds")
+
+    var empty = HeadTracker.TiltHistogram()
+    check(empty.isEmpty && empty.median == 0, "an empty window reports nothing rather than a spurious zero")
+    empty.add(30)
+    empty.reset()
+    check(empty.isEmpty, "and a drained one is genuinely empty")
 }
 
 print(fails == 0 ? "\nAll checks passed.\n" : "\n\(fails) FAILED\n")
