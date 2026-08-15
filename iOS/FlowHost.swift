@@ -190,39 +190,33 @@ final class FlowHost: ObservableObject {
     /// 08-13 flight log says every one of them was perfect for forty-two minutes while
     /// a listener was hearing tones drop out.
     ///
-    /// Thrum renders its own binaural field. If "Spatialize Stereo" is enabled for the
-    /// route — a per-route user setting, reachable by long-pressing the volume slider
-    /// in Control Centre — then iOS takes that finished binaural mix and spatialises it
-    /// *again*, head-tracked, against its own model of where the head is. Two
-    /// head-tracked HRTFs in series, each moving the image as the head turns, is not a
-    /// configuration anyone designed; what it sounds like is not predictable from
-    /// either one alone, and extreme head angles are exactly where two disagreeing
-    /// models disagree most.
+    /// **This does not say whether iOS is spatialising our output, and three
+    /// investigations proceeded as though it did.** Corrected 2026-08-15, by the
+    /// listener: "I can't stress enough that Spatial Audio is off in the AirPods
+    /// controls" — while every heartbeat of that session logged it as ON.
     ///
-    /// There is no API to refuse it on iOS — `setIntendedSpatialExperience` is
-    /// visionOS-only — so this is read and recorded rather than set. A single word in
-    /// the log settles a question that four offline harnesses could not.
-    private var systemSpatialization: Bool {
+    /// `AVAudioSessionPortDescription.isSpatialAudioEnabled` is a property of the
+    /// **port**. Its own header says "true if the port *supports* spatial audio
+    /// playback and the feature is enabled", and the rest of that comment is about
+    /// rendering *multi-channel* content on two-channel hardware —
+    /// `setSupportsMultichannelContent`, `maximumOutputNumberOfChannels`,
+    /// HDMI receivers doing 5.1. AirPods Pro report true because they are AirPods
+    /// Pro. It is a capability, not a state, and it is true whatever the listener
+    /// has chosen in Control Centre.
+    ///
+    /// "Spatialize Stereo" — the Off / Fixed / Head Tracked control on the volume
+    /// slider — has **no public API at all**. It cannot be read and it cannot be
+    /// refused (`setIntendedSpatialExperience` is visionOS-only). So an app cannot
+    /// know, and must not claim to: the honest position is that this is unobservable
+    /// from inside the process, and any question that turns on it has to be settled
+    /// by asking the person wearing the headphones.
+    ///
+    /// Kept, renamed, and still logged — a port that reports this false when AirPods
+    /// are connected would itself be worth knowing about — but it is no longer
+    /// evidence of anything about the listener's settings, and nothing is shown on
+    /// screen on the strength of it.
+    private var portSupportsSpatialAudio: Bool {
         AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.isSpatialAudioEnabled }
-    }
-
-    /// The same fact, on the screen instead of in a log file.
-    ///
-    /// It was written to the flight log for three investigations running and read
-    /// by nobody at the time it mattered, which is the wrong place for it. Every
-    /// heartbeat of the 08-15 session says `system-spatial ON`, and the note left
-    /// after the 08-14 one says in as many words to rule it out first — so the one
-    /// walk that was supposed to settle whether this is the cause was run with it
-    /// on, and cannot. A file that has to be pulled off the phone over USB cannot
-    /// remind anyone of anything before a walk; a line on the screen can.
-    ///
-    /// Only shown when it actually matters — Thrum rendering its own binaural field
-    /// into a system that is about to spatialise it again. On speakers, or with the
-    /// field off, iOS doing this is not a conflict and the warning would be noise.
-    @Published private(set) var systemSpatialConflict = false
-
-    private func refreshSpatialConflict() {
-        systemSpatialConflict = engine.spatialEnabled && systemSpatialization
     }
 
     /// Ask for a long IO buffer — again, because asking once is not enough.
@@ -473,9 +467,8 @@ final class FlowHost: ObservableObject {
             }
         } else {
             FlightRecorder.shared.note(
-                "route → \(model.route.name), system-spatial \(systemSpatialization ? "ON" : "off")")
+                "route → \(model.route.name), port-spatial-capable \(portSupportsSpatialAudio ? "yes" : "no")")
         }
-        refreshSpatialConflict()
         updateHeadTracking()
     }
 
@@ -554,7 +547,7 @@ final class FlowHost: ObservableObject {
         sample.stalls = head.stalls
         sample.longestStallMilliseconds = head.longestStall * 1000
         sample.tiltAtStall = head.tiltAtStall
-        sample.systemSpatial = systemSpatialization
+        sample.portSpatialCapable = portSupportsSpatialAudio
         sample.listenerWrites = listenerWrites
         listenerWrites = 0
         if let gaps = pump?.drainGaps() {
@@ -611,10 +604,7 @@ final class FlowHost: ObservableObject {
         // heartbeat had different fields — recoverable, but only after noticing.
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        FlightRecorder.shared.note("START — v\(v) (\(b)), \(bufferReport), route \(model.route.name), spatial \(engine.spatialEnabled), system-spatial \(systemSpatialization ? "ON" : "off"), \(model.harmony.subtitle)")
-        // The moment worth telling the listener, if it is going to be told at all:
-        // they have just started a session and are still looking at the screen.
-        refreshSpatialConflict()
+        FlightRecorder.shared.note("START — v\(v) (\(b)), \(bufferReport), route \(model.route.name), spatial \(engine.spatialEnabled), port-spatial-capable \(portSupportsSpatialAudio ? "yes" : "no"), \(model.harmony.subtitle)")
         // The key is in here because it is now chosen rather than fixed, and with
         // the controls hidden there is otherwise nothing that says which one a
         // given session got — on a phone, with no console in reach, "it sounds
@@ -1003,8 +993,7 @@ final class FlowHost: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 FlightRecorder.shared.note(
-                    "SYSTEM SPATIALIZATION now \(self.systemSpatialization ? "ON" : "off")")
-                self.refreshSpatialConflict()
+                    "port spatial capability now \(self.portSupportsSpatialAudio ? "yes" : "no")")
             }
         })
 

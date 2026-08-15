@@ -565,6 +565,27 @@ public final class HeadTracker: ObservableObject {
     /// a torso across that path. This does not prove that is the cause; it makes the
     /// next walk able to say so, by recording the largest gap between samples and the
     /// tilt the head was at when it happened.
+    ///
+    /// **It said so, and the answer was no (08-15).** 32 stalls across 56 minutes,
+    /// and `tiltAtStall` is −18°…+15° every one of them — ordinary head angles, not
+    /// the extremes. Windows with *more* tilt movement had if anything *fewer*
+    /// stalls (0.20 per 30 s against 0.39). So the chin-across-the-path story is
+    /// dead: stalls are real, but they are not a function of where the head is.
+    ///
+    /// The instrumentation still earned its keep, because it caught something else
+    /// entirely — the stalls were being *mishandled* when they arrived, by a slew
+    /// limit that scaled with the gap and so could never fire on one. See
+    /// `HeadSmoother.maxCatchUpInterval`. That is fixed, and it is a real defect,
+    /// but nothing in this log ties it to the tilt gesture either.
+    ///
+    /// What is left after 08-15: the render path is exonerated four times over
+    /// (`Tools/warble`, `Tools/pole`, the vector round-trip, and now a level trace
+    /// that is flat against gaze angle), reference drift is fixed and measured
+    /// bounded, and iOS double-spatialisation — long carried as the outstanding
+    /// confounder — was never observable in the first place and was in fact switched
+    /// off by the listener throughout. The app's own output is clean at every mark.
+    /// The next thing to separate is whether the artifact survives with *our* head
+    /// tracking disabled, which is the one A/B nothing here has run.
     public private(set) var peakTilt: Double = 0
     public private(set) var stalls = 0
     public private(set) var longestStall: Double = 0

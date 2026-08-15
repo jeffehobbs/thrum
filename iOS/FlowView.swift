@@ -345,32 +345,14 @@ struct FlowView: View {
                 }
                 .foregroundStyle(.white.opacity(0.8))
 
-                // iOS is about to spatialise a mix that is already spatialised.
-                //
-                // Thrum renders its own head-tracked binaural field; "Spatialize
-                // Stereo" takes that finished mix and does it again against iOS's
-                // own idea of where the head is. Two head-tracked HRTFs in series is
-                // not a configuration anyone designed, and there is no API to
-                // decline it — `setIntendedSpatialExperience` is visionOS-only — so
-                // the only thing the app can do about it is say so.
-                //
-                // It says so *here* rather than only in the flight log because that
-                // is where it has been for three investigations, and the walk that
-                // was meant to rule it out was recorded with it on. A warning that
-                // has to be pulled off the phone over USB arrives after the session
-                // it was about.
-                if host.systemSpatialConflict {
-                    Text("iOS is spatializing this again — long-press the volume slider in Control Center and turn Spatial Audio off")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.orange.opacity(0.75))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                        .transition(.opacity)
-                        .onTapGesture {
-                            host.touched()
-                            reveal()
-                        }
-                }
+                // No "iOS is spatializing this again" warning here, and there must
+                // not be one: nothing on iOS can tell whether it is. See
+                // `FlowHost.portSupportsSpatialAudio` — the property that looked
+                // like it could is a statement about the *port*, and it is true of
+                // AirPods whatever the listener has chosen. A warning driven off it
+                // fires every session on the strength of nothing, which is worse
+                // than silence: it trains the one person who could act on a real
+                // warning to ignore this one.
 
                 // What the thumbs have added up to. Empty on a fresh install, which
                 // is the honest state — there is nothing to claim to have learned

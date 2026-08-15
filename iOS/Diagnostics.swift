@@ -154,16 +154,20 @@ struct FlightSample {
     var stalls = 0
     var longestStallMilliseconds = 0.0
     var tiltAtStall = 0.0
-    /// Whether iOS is spatialising our already-binaural output a second time — see
-    /// `FlowHost.systemSpatialization`. The only term in this line that describes
-    /// something happening *downstream* of the app.
-    var systemSpatial = false
+    /// Whether the output *port* reports spatial-audio capability — see
+    /// `FlowHost.portSupportsSpatialAudio`, and read that comment before drawing
+    /// any conclusion from this. It was logged as `system-spatial ON/off` for three
+    /// investigations and read as "iOS is spatialising us again", which it never
+    /// meant: it is true of AirPods regardless of what the listener has chosen, and
+    /// on 08-15 it read ON through a whole session with Spatial Audio switched off.
+    /// Nothing downstream of the app is observable from in here.
+    var portSpatialCapable = false
 
     var line: String {
         String(format: "heartbeat  load %.2f  overruns %d  motion %d/30s  %@  spatial %@  tracking %@  %@  %@"
                + "  peak %.0f°/s  clamped %d  writes %d  gaps %d (%.0f ms, worst %.0f)"
                + "  tilt %.0f…%.0f (med %.0f)  raw %.0f…%.0f (med %.0f)"
-               + "  stalls %d (worst %.0f ms at %.0f°)  system-spatial %@",
+               + "  stalls %d (worst %.0f ms at %.0f°)  port-spatial-capable %@",
                load, overruns, motionUpdates, route as NSString,
                spatial ? "on" : "off", tracking ? "on" : "off",
                transport as NSString, buffer as NSString,
@@ -171,7 +175,7 @@ struct FlightSample {
                gaps, gapMilliseconds, largestGapMilliseconds,
                tiltLow, tiltHigh, tiltMedian, rawLow, rawHigh, rawMedian,
                stalls, longestStallMilliseconds, tiltAtStall,
-               (systemSpatial ? "ON" : "off") as NSString)
+               (portSpatialCapable ? "yes" : "no") as NSString)
     }
 }
 
