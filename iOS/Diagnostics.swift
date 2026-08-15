@@ -193,7 +193,7 @@ struct FlightSample {
 /// The detector is a two-timescale comparison rather than a threshold, because a
 /// drone's level is always moving: a slow reference that decays gently, and the
 /// current block against it. Flow taking a voice away moves both together over its
-/// nine-second breath and never triggers. A tone that stops moves only the fast one.
+/// own long ramp and never triggers. A tone that stops moves only the fast one.
 ///
 /// Nothing here allocates, logs or locks on the audio thread — the tap writes numbers
 /// into plain fields and a timer on the main actor drains them. The benign race that
@@ -277,8 +277,8 @@ final class DropoutWatch {
 /// the one thing five days of measurement has been unable to do — put a timestamp on
 /// the symptom. Every automatic detector so far has had to guess what the fault looks
 /// like in order to trigger on it, and each guess has been wrong: a threshold tuned
-/// for a cut fires on Flow's nine-second breath, and one tuned to ignore breathing
-/// may be ignoring the fault. A human ear knows the difference without being told.
+/// for a cut fires on Flow's own slow swells, and one tuned to ignore them may be
+/// ignoring the fault. A human ear knows the difference without being told.
 ///
 /// **The window is retroactive, and that is the whole design.** By the time a listener
 /// has heard something, decided it was the fault, and got a phone out of a pocket,

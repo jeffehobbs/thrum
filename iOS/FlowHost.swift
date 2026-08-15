@@ -206,6 +206,25 @@ final class FlowHost: ObservableObject {
         AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.isSpatialAudioEnabled }
     }
 
+    /// The same fact, on the screen instead of in a log file.
+    ///
+    /// It was written to the flight log for three investigations running and read
+    /// by nobody at the time it mattered, which is the wrong place for it. Every
+    /// heartbeat of the 08-15 session says `system-spatial ON`, and the note left
+    /// after the 08-14 one says in as many words to rule it out first — so the one
+    /// walk that was supposed to settle whether this is the cause was run with it
+    /// on, and cannot. A file that has to be pulled off the phone over USB cannot
+    /// remind anyone of anything before a walk; a line on the screen can.
+    ///
+    /// Only shown when it actually matters — Thrum rendering its own binaural field
+    /// into a system that is about to spatialise it again. On speakers, or with the
+    /// field off, iOS doing this is not a conflict and the warning would be noise.
+    @Published private(set) var systemSpatialConflict = false
+
+    private func refreshSpatialConflict() {
+        systemSpatialConflict = engine.spatialEnabled && systemSpatialization
+    }
+
     /// Ask for a long IO buffer — again, because asking once is not enough.
     ///
     /// ~85 ms. Latency is worthless to this app and expensive to hold, so it is traded
@@ -456,6 +475,7 @@ final class FlowHost: ObservableObject {
             FlightRecorder.shared.note(
                 "route → \(model.route.name), system-spatial \(systemSpatialization ? "ON" : "off")")
         }
+        refreshSpatialConflict()
         updateHeadTracking()
     }
 
@@ -592,6 +612,9 @@ final class FlowHost: ObservableObject {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         FlightRecorder.shared.note("START — v\(v) (\(b)), \(bufferReport), route \(model.route.name), spatial \(engine.spatialEnabled), system-spatial \(systemSpatialization ? "ON" : "off"), \(model.harmony.subtitle)")
+        // The moment worth telling the listener, if it is going to be told at all:
+        // they have just started a session and are still looking at the screen.
+        refreshSpatialConflict()
         // The key is in here because it is now chosen rather than fixed, and with
         // the controls hidden there is otherwise nothing that says which one a
         // given session got — on a phone, with no console in reach, "it sounds
@@ -824,11 +847,27 @@ final class FlowHost: ObservableObject {
     /// thumb, everywhere, goes through here — so the log either has the line or the
     /// button is not reaching us.
     func rate(_ vote: Taste.Vote, from source: String = "screen") {
-        let recorded = model.flow.rate(vote)
+        let verdict = model.flow.rate(vote)
         FlightRecorder.shared.note(
-            "rate \(vote.rawValue) — \(source)\(recorded ? "" : " (repeat, not counted)")")
+            "rate \(vote.rawValue) — \(source)\(verdict == .corrected ? " (corrected)" : "")")
+
+        // The backstop that closes the correction window in wall-clock time.
+        //
+        // `FlowDirector` expires a held vote on its own clock, which is the right
+        // clock for the offline harness and for a session that is playing — but it
+        // stops when Flow does, and a vote cast against the tail of a stopped drone
+        // is one `rate` has always accepted. Without this, that vote would be held
+        // for ever and never written down. Slightly past the window so the clock
+        // path wins whenever there is one.
+        voteWindowTimer?.invalidate()
+        voteWindowTimer = Timer.scheduledTimer(withTimeInterval: FlowDirector.correctionWindow + 0.2,
+                                               repeats: false) { _ in
+            Task { @MainActor in self.model.flow.commitVote() }
+        }
         touched()
     }
+
+    private var voteWindowTimer: Timer?
 
     /// Fill a feedback control in, then clear it.
     ///
@@ -965,6 +1004,7 @@ final class FlowHost: ObservableObject {
                 guard let self else { return }
                 FlightRecorder.shared.note(
                     "SYSTEM SPATIALIZATION now \(self.systemSpatialization ? "ON" : "off")")
+                self.refreshSpatialConflict()
             }
         })
 
@@ -1105,9 +1145,10 @@ final class FlowHost: ObservableObject {
         // An earlier version of this comment argued the opposite, that ⏭ was wrong
         // because cycling a timbre from a steering wheel would click. That objection
         // was about a *raw* cycle. `rate(.down)` doesn't do one: it goes through
-        // `FlowDirector.moveOn`, which changes a single quality using the same
-        // nine-second breath and the same glide as the scheduled version. Nothing
-        // reached from here can arrive any more abruptly than Flow's own gestures.
+        // `FlowDirector.moveOn`, which changes a single quality on that quality's
+        // own ramp — the spectrum crossfade, the glide — exactly as the scheduled
+        // version does. Nothing reached from here can arrive any more abruptly than
+        // Flow's own gestures.
         //
         // What is lost is discoverability, and there is no fixing it from here:
         // `localizedTitle` lives on `MPFeedbackCommand`, not on `MPRemoteCommand`, so
@@ -1255,6 +1296,10 @@ final class FlowHost: ObservableObject {
         // settles it, and it is why the heartbeat is not gated on the screen.
         FlightRecorder.shared.note("background")
         visualizerRunning = false
+        // Deliberately *not* committing a held vote here. Backgrounding looks like
+        // the end of the moment, but the lock screen and CarPlay can both still
+        // cast one — so the second thumb of a correction very often arrives after
+        // this, from a screen that is not this one.
     }
 
     // MARK: - Visualizer feed
@@ -1295,6 +1340,11 @@ final class FlowHost: ObservableObject {
     }
 
     func shutdown() {
+        // A vote still inside its window is a real opinion that has simply not been
+        // written down yet. Losing it because the app was closed five seconds after
+        // the press would be a rating button that silently drops presses.
+        model.flow.commitVote()
+        voteWindowTimer?.invalidate()
         idleTimer?.invalidate()
         for o in observers { NotificationCenter.default.removeObserver(o) }
         observers.removeAll()

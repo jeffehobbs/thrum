@@ -164,6 +164,43 @@ public struct HeadSmoother {
     /// rotation, it is an event — and an intermittent one, on whichever axis wrapped.
     public static let maxDegreesPerSecond = 400.0
 
+    /// The longest gap between samples still treated as elapsed time when easing
+    /// toward a new orientation.
+    ///
+    /// Without this the slew limit above is unenforceable against the one thing it
+    /// was written for, and the 08-15 log says so in as many words: 32 stalls of up
+    /// to 2 s, and `clamped 0` on every heartbeat. Both numbers are correct and
+    /// together they are the bug.
+    ///
+    /// Both terms in `step` scale with `dt`, so a long gap relaxes them in exactly
+    /// the wrong direction. At the 50 Hz the AirPods deliver, a one-pole moves 15%
+    /// of the way to a new orientation per sample and the limiter allows 8° —
+    /// sensible. After a 1.3 s gap the one-pole's fraction has risen to 1.000 and
+    /// the limiter allows 520°, so the whole movement the head made while the
+    /// stream was quiet is applied to sixteen HRTFs **in a single frame**, and the
+    /// guard reports nothing because 40° really is less than 520°. A dropped
+    /// Bluetooth batch is named in `maxDegreesPerSecond`'s own doc comment as a
+    /// discontinuity it exists to catch; it was the one case it could not.
+    ///
+    /// Capping the interval makes a resumed stream look like an ordinary sample:
+    /// the field eases to where the head now is over the following few samples,
+    /// at a rate the limiter can and does police. 50 ms is longer than any real
+    /// interval (20 ms at 50 Hz, 40 at 25) so nothing about normal operation
+    /// changes, and short enough that a resumed stream catches up in about a third
+    /// of a second.
+    ///
+    /// What a gap is *replaced* by is the stream's own recent interval rather than
+    /// this constant, which is the difference between the first sample back being
+    /// an ordinary one and it being twice as hard as one: at 50 Hz, substituting
+    /// 50 ms would move the field 13.6° of a 40° movement in one frame where a real
+    /// sample moves 6.1°. This threshold only decides *what counts as* a gap.
+    ///
+    /// Only the easing is capped. The leak still gets the true `dt`, because drift
+    /// genuinely did accumulate for the whole gap and draining it is not an event
+    /// anyone hears; and the reported rate still uses it, because the diagnostics'
+    /// job is to describe the input rather than to flatter it.
+    public static let maxCatchUpInterval = 0.05
+
     public static let identity = simd_quatd(ix: 0, iy: 0, iz: 0, r: 1)
 
     /// The change of frame from CoreMotion's axes to the environment node's, as a
@@ -202,6 +239,9 @@ public struct HeadSmoother {
     /// ordinary 50°/s nod reads as 171°/s that way, which would make the one number
     /// whose job is to say "this stream is not physically possible" say it always.
     private var previous: simd_quatd?
+    /// What this stream's sample interval has recently been, so a late sample can
+    /// be eased in as though it were an ordinary one. Nil until the first sample.
+    private var typicalInterval: Double?
 
     public init() {}
 
@@ -312,8 +352,18 @@ public struct HeadSmoother {
     /// The real entry point. `CMAttitude.quaternion` is singularity-free, so nothing
     /// on this path ever forms an Euler angle except the readout at the end.
     public mutating func step(rotation target: simd_quatd, dt: Double) -> HeadStep {
-        let limit = Self.maxDegreesPerSecond * dt
-        let smoothing = Self.coefficient(for: dt)
+        // Not `dt` — see `maxCatchUpInterval`. A gap in the stream must not buy the
+        // field permission to jump, so a late sample is eased in as though it had
+        // arrived on time, at whatever "on time" has recently meant.
+        let ease: Double
+        if dt <= Self.maxCatchUpInterval {
+            typicalInterval = typicalInterval.map { $0 * 0.9 + dt * 0.1 } ?? dt
+            ease = dt
+        } else {
+            ease = typicalInterval ?? Self.maxCatchUpInterval
+        }
+        let limit = Self.maxDegreesPerSecond * ease
+        let smoothing = Self.coefficient(for: ease)
 
         // The one-pole, on the geodesic: move a fixed fraction of the remaining
         // rotation each sample, exactly as before, but along the shortest arc through

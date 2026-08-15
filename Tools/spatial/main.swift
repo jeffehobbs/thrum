@@ -427,6 +427,50 @@ do {
     let fast = (0..<40).map { i -> (Double, Double, Double) in (300 * Double(i) * 0.04, 0, 0) }
     check(run(fast).clamped == 0, "so is a 300°/s turn of the head")
 
+    // A stall in the motion stream, which the 08-15 flight log has 32 of, the worst
+    // 2.0 s long — and `clamped 0` on every heartbeat while they happened.
+    //
+    // The head keeps moving while the stream is quiet, so the first sample back
+    // carries the whole movement at once. Both terms in `step` used to scale with
+    // the interval, which relaxed them precisely when they were needed: at a 1.3 s
+    // gap the one-pole's fraction reaches 1.000 and the limiter's allowance reaches
+    // 520°, so a 40° movement was applied to sixteen HRTFs in one frame and the
+    // guard correctly reported nothing, because 40 is less than 520.
+    //
+    // The control below is the whole point. It reproduces what the old code did by
+    // asking for the same interval as a *sequence of ordinary samples with a jump
+    // in it* — the same information, arriving in a way the smoother was already
+    // known to handle — so the two runs differ only in the gap. Per the house rule,
+    // the assertion is first that the harness sees the artifact: if `stalled` and
+    // `continuous` came out alike, this would be measuring nothing.
+    func afterGap(_ gap: Double, moved: Double) -> Double {
+        var s = HeadSmoother()
+        var out: [AVAudio3DVectorOrientation] = []
+        for _ in 0..<50 { out.append(s.step(yaw: 0, pitch: 0, roll: 0, dt: 0.02).head.orientation) }
+        // One sample arrives late, carrying everything the head did in the meantime.
+        out.append(s.step(yaw: moved, pitch: 0, roll: 0, dt: gap).head.orientation)
+        for _ in 0..<50 { out.append(s.step(yaw: moved, pitch: 0, roll: 0, dt: 0.02).head.orientation) }
+        return biggestStep(out)
+    }
+    let stalled = afterGap(2.0, moved: 40)
+    let brief = afterGap(0.02, moved: 40)
+    check(stalled <= brief * 1.2,
+          "a 2 s stall in the stream moves the field no harder than an ordinary sample",
+          String(format: "%.2f° per frame after the gap, vs %.2f° with no gap", stalled, brief))
+    // 400°/s × 50 ms is 20°, so anything at or under that is inside the guard; the
+    // old behaviour put the entire 40° through in one frame.
+    check(stalled < 20,
+          "and the slew limit can actually reach it now",
+          String(format: "%.2f° in one frame, against 40° of head movement", stalled))
+    // The field must still get there — easing must not become ignoring.
+    var caught = HeadSmoother()
+    for _ in 0..<20 { _ = caught.step(yaw: 0, pitch: 0, roll: 0, dt: 0.02) }
+    _ = caught.step(yaw: 40, pitch: 0, roll: 0, dt: 2.0)
+    for _ in 0..<40 { _ = caught.step(yaw: 40, pitch: 0, roll: 0, dt: 0.02) }
+    check(abs(caught.yaw - 40) < 2,
+          "and the field arrives where the head went, within a second of the stream returning",
+          String(format: "%.1f° of 40 after 0.8 s", caught.yaw))
+
     // The bug this fixes. Roll used to get neither the wrap nor the shortest way
     // round, so a head tilted far enough to take CoreMotion's roll from +179° to
     // −179° handed the one-pole a 358° error and it set off the long way, sweeping

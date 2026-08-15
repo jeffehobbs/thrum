@@ -446,6 +446,109 @@ func runTasteChecks() {
 
     // ------------------------------------------------------ credit for dwell time
 
+    // -------------------------------------------------------- correcting a vote
+
+    print("\n— reversing a thumb within five seconds is a correction, not a second opinion —")
+    do {
+        /// Start Flow, let it settle, then press thumbs in a given order at given
+        /// times, and run on long enough for everything to be written down.
+        @MainActor
+        func press(_ presses: [(at: Double, vote: Taste.Vote)], then: Double = 12)
+            -> (taste: Taste, verdicts: [FlowDirector.Verdict]) {
+            let taste = Taste(now: { dial.t })
+            let model = newModel(taste)
+            model.flow.start()
+            for _ in 0..<900 { model.flow.advance(by: 0.1) }
+            var verdicts: [FlowDirector.Verdict] = []
+            var t = 0.0
+            for p in presses.sorted(by: { $0.at < $1.at }) {
+                while t < p.at { model.flow.advance(by: 0.1); t += 0.1 }
+                verdicts.append(model.flow.rate(p.vote))
+            }
+            for _ in 0..<Int(then * 10) { model.flow.advance(by: 0.1) }
+            model.flow.stop()
+            return (taste, verdicts)
+        }
+
+        // The case the listener described: thumbs-down by mistake, thumbs-up a
+        // second later. One opinion goes in, and it is the second one.
+        let fixed = press([(0, .down), (1.0, .up)])
+        check(fixed.taste.ups == 1 && fixed.taste.downs == 0,
+              "a reversal inside the window files one vote, the corrected one",
+              "\(fixed.taste.ups) up, \(fixed.taste.downs) down")
+        check(fixed.verdicts == [.filed, .corrected],
+              "and the second press reports itself as a correction",
+              "\(fixed.verdicts)")
+
+        // The control that gives the check above its meaning: the same two presses
+        // far enough apart are two genuine changes of mind, and both are recorded.
+        // Without this, "one vote went in" would also be satisfied by a bug that
+        // dropped the second press entirely.
+        let late = press([(0, .down), (7.0, .up)])
+        check(late.taste.ups == 1 && late.taste.downs == 1,
+              "the same two presses outside it are still two opinions",
+              "\(late.taste.ups) up, \(late.taste.downs) down")
+        check(late.verdicts == [.filed, .filed],
+              "and neither reports as a correction", "\(late.verdicts)")
+
+        // Correcting the correction, all inside one window.
+        let twice = press([(0, .up), (1.0, .down), (2.0, .up)])
+        check(twice.taste.ups == 1 && twice.taste.downs == 0,
+              "changing your mind twice inside the window still files one vote",
+              "\(twice.taste.ups) up, \(twice.taste.downs) down")
+
+        // A run of presses of the *same* thumb must not hold the vote open for
+        // ever — the window is anchored to the first press, not the last.
+        let nervous = press([(0, .up), (1, .up), (2, .up), (3, .up), (4, .up)], then: 3)
+        check(nervous.taste.ups == 1 && nervous.taste.downs == 0,
+              "a nervous run of the same thumb still files exactly one vote, on time",
+              "\(nervous.taste.ups) up, \(nervous.taste.downs) down")
+
+        // And the audible half. A thumbs-down that was taken back must leave no
+        // trace at all, which means it must not have hurried a change along.
+        //
+        // Measured against two controls rather than in the abstract, because Flow
+        // reseeds every `start()` and changes the drone on its own timers anyway:
+        // how often the character moves in the twelve seconds after a *corrected*
+        // press has to look like a run with no press in it, and nothing like a run
+        // with a real thumbs-down in it.
+        @MainActor
+        func movedWithin(_ presses: [(at: Double, vote: Taste.Vote)], trials: Int = 30) -> Int {
+            func character(_ m: ThrumModel) -> String {
+                "\(m.harmony.modeIndex)/\(m.timbreIndex)/\(m.voicing?.rawValue ?? "-")/\(m.harmony.tuning.rawValue)"
+            }
+            var moved = 0
+            for _ in 0..<trials {
+                let model = newModel(Taste(now: { dial.t }))
+                model.flow.start()
+                for _ in 0..<900 { model.flow.advance(by: 0.1) }
+                var t = 0.0
+                for p in presses.sorted(by: { $0.at < $1.at }) {
+                    while t < p.at { model.flow.advance(by: 0.1); t += 0.1 }
+                    model.flow.rate(p.vote)
+                }
+                let before = character(model)
+                for _ in 0..<120 { model.flow.advance(by: 0.1) }   // 12 s
+                if character(model) != before { moved += 1 }
+                model.flow.stop()
+            }
+            return moved
+        }
+        // Stated as "which population does the corrected run belong to" rather than
+        // as a tolerance on the quiet one. Flow reseeds every `start()` and moves
+        // the drone on its own timers, so the quiet baseline is itself noisy — 1 to
+        // 7 in 30 across runs — and `corrected <= quiet + 3` failed a third of the
+        // time on nothing but that noise. The separation is enormous and stable;
+        // the first version of this check just measured it in the wrong units.
+        let trials = 40
+        let quiet = movedWithin([], trials: trials)
+        let corrected = movedWithin([(0, .down), (1.0, .up)], trials: trials)
+        let real = movedWithin([(0, .down)], trials: trials)
+        check(real >= trials * 4 / 5 && Double(corrected) < Double(quiet + real) / 2,
+              "a taken-back thumbs-down does not hurry a change along either",
+              "changed within 12 s: no press \(quiet)/\(trials), corrected \(corrected)/\(trials), real \(real)/\(trials)")
+    }
+
     print("\n— credit follows how long a quality has been audible —")
     do {
         check(Taste.credit(dwell: 0) < 0.4, "a quality that just arrived takes partial credit",

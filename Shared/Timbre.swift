@@ -100,5 +100,32 @@ public enum TimbreCatalog {
             sitarBias: 0.45, swellScale: 0.9, hue: 0.11),
     ]
 
-    public static let maxPartials = 14
+    /// Every harmonic number any timbre asks for, once, in order.
+    ///
+    /// This is what makes one timbre able to *become* another instead of replacing
+    /// it. Each voice renders this list rather than a timbre's own partial list, so
+    /// slot `k` is the same harmonic in every timbre and always has been — which
+    /// means a timbre change is nothing but the amplitude of each slot moving to a
+    /// new value. Partials the two timbres share simply change level; ones only the
+    /// old timbre had fade to nothing; ones only the new one has rise from it. No
+    /// oscillator is ever started, stopped or re-tuned, so there is no phase to
+    /// break and no moment at which the change happens.
+    ///
+    /// The alternative — rendering both timbres at once and cross-mixing them —
+    /// costs twice the partials for the whole fade and still has to decide what to
+    /// do about the harmonics they have in common (summing two copies of the same
+    /// partial at different phases is a comb filter, not a crossfade).
+    ///
+    /// Currently {0.5, 1…14, 16}: sixteen slots against the fourteen the densest
+    /// single timbre uses, so the cost of the whole feature is two oscillator pairs
+    /// per voice.
+    public static let harmonics: [Double] = {
+        var seen = Set<Double>()
+        for t in all { for p in t.partials { seen.insert(p.h) } }
+        return seen.sorted()
+    }()
+
+    /// The slot count every voice renders. Not "the most partials a timbre has" any
+    /// more — see `harmonics`.
+    public static let maxPartials = harmonics.count
 }

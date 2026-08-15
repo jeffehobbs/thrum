@@ -9,10 +9,13 @@ import Foundation
 /// Two rules follow from it. First, Flow never sets a value — it opens a **ramp**
 /// and slides, over twenty to ninety seconds, on a curve with zero velocity and
 /// zero acceleration at both ends, so a change has no edge to notice at either
-/// side. Second, the one genuinely discontinuous thing in the instrument —
-/// swapping a timbre, which recomputes every partial — is hidden underneath a
-/// **breath**: Flow leans on Swell Ride, changes the reeds while the drone is
-/// down, and brings it back up. That reads as the room inhaling.
+/// side. Second, nothing is *hidden*: where the instrument used to have a
+/// genuinely discontinuous edit — swapping a timbre, which recomputed every
+/// partial at once — Flow used to dip the whole drone underneath it and change
+/// the reeds while it was down. That was the wrong shape of fix and a listener
+/// caught it: the dip is itself an event, so it drew attention to the very moment
+/// it was covering. The engine crossfades its spectrum now
+/// (`DroneEngine.timbreSeconds`) and Flow simply asks for the new timbre.
 ///
 /// Every gesture runs on its own clock at its own tempo, so nothing lines up:
 /// parameters drift every ten seconds or so, voicings turn over every few
@@ -125,6 +128,17 @@ public final class FlowDirector: ObservableObject {
     static let flowGlide: Double = 7.5
     static let handGlide: Double = 0.55
 
+    /// Timbre crossfade time, on the same principle and for the same reason.
+    ///
+    /// A player who has just pressed a timbre pad wants to hear what they pressed,
+    /// so by hand it is quick enough to connect the sound to the press and slow
+    /// enough not to click. Flow has nobody waiting to hear whether the button
+    /// worked, so it takes the long way: fourteen seconds is past the point where
+    /// a listener can attend to the change as it happens, which is the whole
+    /// object.
+    static let flowTimbre: Double = 14
+    static let handTimbre: Double = 2.5
+
     private func ramp(_ p: Param, to target: Double, over seconds: Double) {
         let spec = ThrumModel.spec(p)
         let clamped = min(max(target, spec.range.lowerBound), spec.range.upperBound)
@@ -203,6 +217,7 @@ public final class FlowDirector: ObservableObject {
         // glides at this rate, so a fifth becomes a modulation you notice
         // afterwards rather than a sweep you notice happening.
         model.engine.glideSeconds = Self.flowGlide
+        model.engine.timbreSeconds = Self.flowTimbre
         model.show("Flow — the instrument takes it from here")
 
         startClock()
@@ -226,6 +241,10 @@ public final class FlowDirector: ObservableObject {
     /// while nothing is audible is not time this instrument has lived through.
     public func pause() {
         guard isRunning, !isPaused else { return }
+        // The clock is about to stop, so a vote still inside its window would have
+        // nothing left to expire against. Pausing is also a clear end to the moment
+        // the vote was about.
+        commitVote()
         isPaused = true
         timer?.invalidate()
         timer = nil
@@ -273,6 +292,9 @@ public final class FlowDirector: ObservableObject {
 
     public func stop() {
         guard isRunning else { return }
+        // Before `isRunning` goes false, so a thumbs-down held at the moment of
+        // stopping still counts as one cast against a running drone.
+        commitVote()
         isRunning = false
         isPaused = false
         keyPicked = false
@@ -281,6 +303,7 @@ public final class FlowDirector: ObservableObject {
         ramps.removeAll()
         pending.removeAll()
         model.engine.glideSeconds = Self.handGlide
+        model.engine.timbreSeconds = Self.handTimbre
         // Deliberately no snap-back: wherever Flow had got to is now the patch,
         // which is often better than whatever you started from.
         model.show("Flow off — everything stays where it drifted to")
@@ -302,6 +325,8 @@ public final class FlowDirector: ObservableObject {
         guard isRunning, !isPaused else { return }
         clock += dt
         elapsed = clock
+
+        if let held = pendingVote, clock >= held.until { commitVote() }
 
         for (p, r) in ramps {
             model.set(p, r.value(at: clock))
@@ -446,8 +471,8 @@ public final class FlowDirector: ObservableObject {
     ///
     /// They live outside `perform` so that pulling one forward runs exactly the
     /// scheduled code — the crossfade in `apply`, the glide in `setMode`, the
-    /// nine-second breath around a timbre. A vote changes *when* Flow acts, never
-    /// how carefully.
+    /// fourteen-second spectrum crossfade around a timbre. A vote changes *when*
+    /// Flow acts, never how carefully.
 
     private func moveVoicing() {
         let next = chooseVoicing(excluding: model.voicing)
@@ -469,15 +494,34 @@ public final class FlowDirector: ObservableObject {
         model.setTuning(TuningSystem(rawValue: next) ?? .just5Limit)
     }
 
+    /// No breath any more — the engine crossfades the spectrum itself.
+    ///
+    /// This used to dip the whole drone to 0.22 over nine seconds, swap the timbre
+    /// at the bottom, and bring it back over fourteen. The reasoning was sound and
+    /// the result was not: the listener's report was that a timbre change was
+    /// "sometimes very abrupt, like someone changing presets on a synth keyboard",
+    /// and the dip is most of why. It made the change *conspicuous* — the music
+    /// going quiet is itself an event, and a listener who has noticed it is
+    /// listening carefully at precisely the moment the swap lands. Worse, a dip to
+    /// 0.22 is only −13 dB; the swap was still plainly audible underneath it, so
+    /// the breath bought an announcement and no concealment.
+    ///
+    /// `DroneEngine.timbreSeconds` now turns one spectrum into the other over
+    /// fourteen seconds with no partial ever stepping, which needs no hiding.
+    /// `Tools/timbre` measures the change as indistinguishable from a drone that
+    /// is not changing at all, against a hard swap that stands 1.8–2.8× out of the
+    /// same background.
     private func moveTimbre() {
         let next = choose(.timbre, from: Array(0..<TimbreCatalog.all.count),
                           excluding: model.timbreIndex)
-        breathe {
-            // Stamped here rather than at the call, because this is when the timbre
-            // actually changes — nine and a half seconds after the breath began.
-            self.changedAt[.timbre] = self.clock
-            self.model.setTimbre(next)
-        }
+        // Stamped at the start of the crossfade rather than at its end. The dwell
+        // credit in `Taste.credit` is what decides how much of a vote a
+        // just-changed quality may take, and it is measured in the same seconds
+        // the crossfade runs in — so a listener pressing a thumb eight seconds in
+        // is reacting to a timbre that is most of the way here, which is exactly
+        // the case that rule was written for.
+        changedAt[.timbre] = clock
+        model.setTimbre(next)
     }
 
     // MARK: - Rating
@@ -497,8 +541,8 @@ public final class FlowDirector: ObservableObject {
     /// **Thumbs-down brings the next change forward.** Not a new or special change —
     /// whichever one Flow had already planned next, simply sooner. That keeps every
     /// transition on the rails it was always going to run on (the crossfade in
-    /// `apply`, the glide in `setMode`, the nine-second breath around a timbre), and
-    /// it means the button never invents an event of its own. What arrives is still
+    /// `apply`, the glide in `setMode`, the fourteen-second spectrum crossfade
+    /// around a timbre), and it means the button never invents an event of its own. What arrives is still
     /// shaped by the vote, because every choice Flow makes is weighted by taste.
     /// **One opinion per drone.** A vote is spread across every quality that was
     /// audible when it was cast, which only averages out if each opinion is cast
@@ -520,34 +564,112 @@ public final class FlowDirector: ObservableObject {
     /// makes a second ⏭ meaningful rather than merely tolerated, since by the time it
     /// lands the drone is a different one and the vote counts.
     ///
-    /// Changing your mind is not a repeat: the opposite vote on an unchanged drone is
-    /// a new fact and goes in. It is not an undo — nothing is subtracted — but the
-    /// two sides of the ledger are what cancel, so saying both is self-correcting.
+    /// Changing your mind *late* is not a repeat: the opposite vote on an unchanged
+    /// drone is a new fact and goes in. It is not an undo — nothing is subtracted —
+    /// but the two sides of the ledger are what cancel, so saying both is
+    /// self-correcting.
+    ///
+    /// Changing your mind *immediately* is not that either, and treating it as a
+    /// second opinion is wrong. These buttons get pressed in a pocket, in the dark,
+    /// one-handed, 22 points apart; hitting the wrong one and hitting the right one
+    /// a second later is a **correction**, and the listener held exactly one opinion
+    /// the whole time. Recording both would file a real preference against every
+    /// quality of that drone *and* its opposite, which is not neutral — it is two
+    /// pieces of evidence where there was one, and it drags the smoothed score of
+    /// whatever was sounding towards zero on both sides of the ledger.
+    ///
+    /// So a vote is **held for five seconds before it is written down**. Nothing is
+    /// recorded, and thumbs-down does not hurry the next change along either — the
+    /// point of a correction is that the mistaken press leaves no trace, and an
+    /// audible consequence is a trace. That does mean thumbs-down takes five
+    /// seconds longer to act, which is invisible: what it triggers is a fourteen-
+    /// second timbre crossfade or a voicing change on its own ramp, so the delay is
+    /// a fifth of a transition nobody is timing. The acknowledgement on screen is
+    /// immediate, which is the part a finger is waiting for.
+    ///
+    /// Held on the snapshot taken at the moment of the *press*, not of the commit,
+    /// so the dwell credit still describes what was audible when the listener
+    /// decided rather than what it had drifted to five seconds later.
+    public enum Verdict { case filed, corrected }
+
+    /// How long a vote can still be taken back. The listener's number.
+    static let correctionWindow: Double = 5
+
     @discardableResult
-    public func rate(_ vote: Taste.Vote) -> Bool {
-        let snapshot = snapshot()
-        let traits = snapshot.traits.mapValues(\.value)
-        let repeated = lastRated.map { $0.vote == vote && $0.traits == traits } ?? false
-        if !repeated {
-            taste.record(vote, snapshot)
-            lastRated = (vote, traits)
+    public func rate(_ vote: Taste.Vote) -> Verdict {
+        // A press outside the window closes the previous one first — two opinions
+        // about two drones are two opinions, however quickly they arrived.
+        if let held = pendingVote, clock >= held.until { commitVote() }
+
+        var verdict = Verdict.filed
+        if var held = pendingVote {
+            if held.vote != vote {
+                // The correction itself. Take the newer snapshot: it is the drone
+                // the listener was hearing when they made the choice that stands.
+                held.vote = vote
+                held.snapshot = snapshot()
+                held.corrected = true
+                verdict = .corrected
+            }
+            // A repeat press inside the window changes nothing and — importantly —
+            // does not extend the window, or a nervous run of presses would never
+            // commit at all.
+            pendingVote = held
+        } else {
+            pendingVote = Held(vote: vote, snapshot: snapshot(),
+                               until: clock + Self.correctionWindow, corrected: false)
         }
 
-        guard isRunning else {
-            // Rating the tail of something you have just stopped is legitimate, and
-            // there is nothing to hurry along.
-            model.show(vote == .up ? "Noted — more like that" : "Noted — less like that")
-            return !repeated
+        let held = pendingVote!
+        let subject = isRunning ? "this" : "that"
+        if held.corrected {
+            model.show(vote == .up
+                ? "Corrected — more like \(subject)"
+                : "Corrected — less like \(subject)")
+        } else {
+            model.show(vote == .up
+                ? "Noted — more like \(subject)"
+                : "Noted — less like \(subject)")
         }
-        switch vote {
-        case .up:
-            model.show("Noted — more like this")
-        case .down:
-            hastenNextChange()
-            model.show("Noted — less like this")
-        }
-        return !repeated
+        return verdict
     }
+
+    private struct Held {
+        var vote: Taste.Vote
+        var snapshot: Taste.Snapshot
+        var until: Double
+        var corrected: Bool
+    }
+
+    /// A vote cast but not yet written down. At most one — a second press either
+    /// corrects this one or closes it.
+    private var pendingVote: Held?
+
+    /// Write the held vote down and let it act. Idempotent, and safe to call from
+    /// anywhere: the clock-driven path in `tick`, the transport paths, and the
+    /// host's own five-second timer all end up here.
+    ///
+    /// The host's timer is not redundant. Flow's `clock` only advances while it is
+    /// running and unpaused, so a vote cast on a stopped drone — rating the tail of
+    /// something you have just finished, which `rate` has always allowed — has no
+    /// clock to expire against and would otherwise sit unwritten for ever.
+    public func commitVote() {
+        guard let held = pendingVote else { return }
+        pendingVote = nil
+
+        let traits = held.snapshot.traits.mapValues(\.value)
+        let repeated = lastRated.map { $0.vote == held.vote && $0.traits == traits } ?? false
+        if !repeated {
+            taste.record(held.vote, held.snapshot)
+            lastRated = (held.vote, traits)
+        }
+        // Only now, and only if it survived the window as a thumbs-down.
+        if held.vote == .down, isRunning { hastenNextChange() }
+    }
+
+    /// Whether a vote is still inside its correction window, for the harness and
+    /// for a UI that wants to say so.
+    public var voteIsPending: Bool { pendingVote != nil }
 
     /// Gestures that change the character of the drone rather than nudging a
     /// slider, and that are *guaranteed* to change it — each excludes what is
@@ -617,18 +739,20 @@ public final class FlowDirector: ObservableObject {
         return true
     }
 
-    /// Dip the whole drone, do something that would otherwise jump, bring it
-    /// back. Swapping a timbre recomputes every partial of every voice; heard at
-    /// full level that is a lurch, and heard through this it is the room
-    /// breathing.
-    private func breathe(_ change: @escaping () -> Void) {
-        let back = model.value(.globalSwell)
-        ramp(.globalSwell, to: 0.22, over: 9)
-        after(9.6) {
-            change()
-            self.ramp(.globalSwell, to: max(0.75, back), over: 14)
-        }
-    }
+    // `breathe` lived here: dip the whole drone to 0.22 over nine seconds, make a
+    // change that would otherwise jump, bring it back over fourteen. It is gone
+    // rather than merely unused, and the reason is worth keeping where the next
+    // person to want one will look.
+    //
+    // It had two callers in its life and has outlived both. Key changes were
+    // removed in 1.3.1 because no amount of hiding made them welcome, and timbre
+    // changes no longer need hiding because `DroneEngine.timbreSeconds` crossfades
+    // the spectrum itself. What the dip actually bought, measured, was the
+    // announcement rather than the concealment: −13 dB is not enough to cover a
+    // spectrum swap, and the silence beforehand is what made the listener attend
+    // to it. The general lesson, if a third caller ever seems to want one: hiding a
+    // discontinuity under a gesture makes the gesture the event. Remove the
+    // discontinuity instead.
 
     /// Arpeggios come and go rather than running all evening: a lane arriving
     /// after four minutes of stillness is worth far more than four lanes running

@@ -50,6 +50,21 @@ public final class DroneEngine {
     // MARK: - Parameters (written from the UI thread, read per block)
 
     public var timbreIndex: Int32 = 0
+    /// How long a timbre takes to turn into the next one, in seconds.
+    ///
+    /// Swapping a spectrum outright is the one edit in this engine that no amount
+    /// of care elsewhere can soften: every partial of every voice changes level in
+    /// the same sample, which is heard as an instrument being exchanged for another
+    /// — the listener's words were "like someone changing presets on a synth
+    /// keyboard". Flow used to hide it by dipping the whole drone to 0.22 first,
+    /// and that turned out to announce the change rather than conceal it: what you
+    /// noticed was the music going quiet, and then something different being there
+    /// when it came back.
+    ///
+    /// Long by the standards of the rest of the engine and deliberately so. A
+    /// timbre change is meant to be something you notice having happened, not
+    /// something you catch happening.
+    public var timbreSeconds: Double = 14
     public var masterVolume: Float = 0.85
     /// Seconds for a tone to bloom to full. 0.5 … 40.
     public var swellSeconds: Double = 7
@@ -169,13 +184,66 @@ public final class DroneEngine {
     // render thread would mean ARC traffic on the render thread, which is how
     // you get dropouts under load; these are plain C buffers.
     private let timbreCount: Int
-    private let tbRatio: UnsafeMutablePointer<Double>   // timbre * maxPartials + p
+    private let tbRatio: UnsafeMutablePointer<Double>   // timbre * maxPartials + slot
     private let tbAmp: UnsafeMutablePointer<Float>      // already loudness-normalized
-    private let tbPartials: UnsafeMutablePointer<Int32>
     private let tbCutoff: UnsafeMutablePointer<Double>
     private let tbBeat: UnsafeMutablePointer<Double>
     private let tbSitarBias: UnsafeMutablePointer<Float>
     private let tbSwell: UnsafeMutablePointer<Double>
+
+    // MARK: The spectrum actually sounding
+    //
+    // Owned by the render thread alone. `timbreIndex` names the timbre the player
+    // (or Flow) has asked for; these are where the sound has got to on its way
+    // there, and every block they move a little closer. Nothing outside the render
+    // loop may write them — that is what makes a timbre change need no
+    // synchronisation beyond the single `Int32` the UI already wrote.
+    //
+    // A one-pole rather than a scheduled A→B fade, and the difference matters: a
+    // second timbre change arriving mid-fade has nothing to interrupt and no
+    // "where was I coming from" to restate. It simply becomes the new target, and
+    // the spectrum that happens to be sounding — which may be part way between two
+    // other timbres — carries on from exactly where it is. Overlapping changes were
+    // otherwise the one case an A→B crossfade could not express without a jump.
+    private let curAmp: UnsafeMutablePointer<Float>     // per slot, what is sounding
+    private let curRatio: UnsafeMutablePointer<Double>  // per slot, ditto
+    private var curCutoff = 1.0
+    private var curBeat = 1.0
+    private var curSwell = 1.0
+    private var curSitarBias: Float = 0
+
+    /// Where the current change set off from — the spectrum that was sounding at
+    /// the moment it began, which is not in general any timbre.
+    private let fadeFromAmp: UnsafeMutablePointer<Float>
+    private let fadeFromRatio: UnsafeMutablePointer<Double>
+    private var fadeFromCutoff = 1.0
+    private var fadeFromBeat = 1.0
+    private var fadeFromSwell = 1.0
+    private var fadeFromSitar: Float = 0
+    /// 0…1 along the current change, before the easing curve.
+    private var fadeMix = 1.0
+
+    /// How many slots are worth rendering: one past the highest harmonic that is
+    /// audible now or will be when this change finishes.
+    ///
+    /// The union is sixteen slots because *some* timbre wants h=16, but no timbre
+    /// wants all sixteen — Harmonium stops at 10, and rendering 11 through 16 at
+    /// zero amplitude cost 28% of the voice loop for silence. Everything above the
+    /// bound is zero in both the spectrum sounding and the one arriving, so it
+    /// cannot become audible without a new change, and a new change recomputes the
+    /// bound before it starts. Taking the max of the two is what makes a partial
+    /// that is on its way *out* keep rendering until it has actually gone.
+    private var activeSlots = 0
+
+    private func slotsInUse(_ ti: Int) -> Int {
+        var last = 0
+        let base = ti * Self.maxPartials
+        for k in 0..<Self.maxPartials where tbAmp[base + k] != 0 { last = k }
+        return last + 1
+    }
+    /// Which timbre `cur*` was last seen heading towards, so the render thread can
+    /// notice the UI thread has changed its mind.
+    private var settledTimbre: Int32 = -1
     /// Per-partial pan fan and beat offsets, precomputed.
     private let partialFan: UnsafeMutablePointer<Double>
     private let beatOffset: UnsafeMutablePointer<Double>
@@ -284,21 +352,27 @@ public final class DroneEngine {
         tbBeat = dbuf(timbreCount)
         tbSwell = dbuf(timbreCount)
         tbSitarBias = fbuf(timbreCount)
-        tbPartials = UnsafeMutablePointer<Int32>.allocate(capacity: timbreCount)
-        tbPartials.initialize(repeating: 0, count: timbreCount)
+        curAmp = fbuf(mp)
+        curRatio = dbuf(mp)
+        fadeFromAmp = fbuf(mp)
+        fadeFromRatio = dbuf(mp)
+        let harmonics = TimbreCatalog.harmonics
         for (ti, t) in catalog.enumerated() {
-            let count = min(t.partials.count, mp)
-            tbPartials[ti] = Int32(count)
             // Normalize by the amplitude sum so swapping timbres doesn't jump
             // the level, and bake the stretch into the ratio while we're here.
             var sum = 0.0
-            for p in 0..<count { sum += t.partials[p].a }
+            for p in t.partials { sum += p.a }
             let norm = Float(0.62 / max(0.001, sum))
-            for p in 0..<count {
-                let h = t.partials[p].h
-                tbRatio[ti * mp + p] = t.inharmonicity > 0
+            let amps = Dictionary(t.partials.map { ($0.h, $0.a) }, uniquingKeysWith: +)
+            for (k, h) in harmonics.enumerated() {
+                // Every slot gets a ratio in every timbre, including the ones this
+                // timbre is silent in. A slot whose amplitude is on its way up from
+                // zero still has to be *somewhere* while it gets there, and the only
+                // ratio that can't be heard arriving is the one it was already at.
+                // Leaving absent slots at zero would sweep them up from DC.
+                tbRatio[ti * mp + k] = t.inharmonicity > 0
                     ? h * (1.0 + t.inharmonicity * h * h).squareRoot() : h
-                tbAmp[ti * mp + p] = Float(t.partials[p].a) * norm
+                tbAmp[ti * mp + k] = Float(amps[h] ?? 0) * norm
             }
             tbCutoff[ti] = t.cutoffScale
             tbBeat[ti] = t.beatScale
@@ -319,10 +393,27 @@ public final class DroneEngine {
 
         partialFan = dbuf(mp)
         beatOffset = dbuf(mp)
-        for p in 0..<mp {
+        for (k, h) in harmonics.enumerated() {
             // Fundamental dead centre; harmonics fan out alternately.
-            partialFan[p] = p == 0 ? 0 : (p % 2 == 0 ? -1.0 : 1.0) * min(1.0, Double(p) / 6.0) * 0.85
-            beatOffset[p] = Self.beatOffsets[p % Self.beatOffsets.count]
+            //
+            // Keyed to the harmonic number rather than to the slot, because a
+            // harmonic the old and new timbres have in common must sit in the same
+            // place in both — otherwise a timbre change would walk shared partials
+            // across the image while their level held steady, and a crossfade that
+            // moves the sound around is not a crossfade. (For a timbre whose
+            // partials run 1, 2, 3… this is the same fan as before, slot for slot.)
+            let rank = h <= 1 ? 0 : Int(h.rounded()) - 1
+            partialFan[k] = rank == 0 ? 0
+                : (rank % 2 == 0 ? -1.0 : 1.0) * min(1.0, Double(rank) / 6.0) * 0.85
+            // Keyed to the harmonic for the same reason, and with the same
+            // side-effect worth having: a partial the two timbres share keeps its
+            // beat rate across the change, so what moves during a crossfade is
+            // level and nothing else. The sub-octave takes the offset off the end
+            // of the table rather than sharing the fundamental's — two oscillator
+            // pairs an octave apart beating at one rate is the single case this
+            // table exists to prevent.
+            beatOffset[k] = Self.beatOffsets[h < 1 ? Self.beatOffsets.count - 1
+                                                   : rank % Self.beatOffsets.count]
         }
 
         // Stagger the starting phases so a fresh chord doesn't stack every
@@ -333,6 +424,9 @@ public final class DroneEngine {
                 phaseB[v * mp + p] = Double((v * 11 + p * 5) % 89) / 89.0
             }
         }
+
+        // Nothing is sounding yet, so there is nothing to be continuous with.
+        snapTimbre()
     }
 
     deinit {
@@ -348,7 +442,9 @@ public final class DroneEngine {
         wetL.deallocate(); wetR.deallocate()
         sumBuf.deallocate(); gainBuf.deallocate()
         busEQ.deallocate()
-        tbRatio.deallocate(); tbAmp.deallocate(); tbPartials.deallocate()
+        tbRatio.deallocate(); tbAmp.deallocate()
+        curAmp.deallocate(); curRatio.deallocate()
+        fadeFromAmp.deallocate(); fadeFromRatio.deallocate()
         tbCutoff.deallocate(); tbBeat.deallocate()
         tbSitarBias.deallocate(); tbSwell.deallocate()
         partialFan.deallocate(); beatOffset.deallocate(); voicePeriod.deallocate()
@@ -529,17 +625,132 @@ public final class DroneEngine {
         loadPeak = 0
     }
 
+    // MARK: - Timbre
+
+    /// Put the sounding spectrum exactly on `timbreIndex`, with no crossfade.
+    ///
+    /// Right at construction, when there is nothing sounding to be discontinuous
+    /// with, and for offline harnesses that want to measure a timbre rather than
+    /// the fourteen seconds of arriving at one.
+    public func snapTimbre() {
+        let ti = Int(min(max(timbreIndex, 0), Int32(timbreCount - 1)))
+        let base = ti * Self.maxPartials
+        for k in 0..<Self.maxPartials {
+            curAmp[k] = tbAmp[base + k]
+            curRatio[k] = tbRatio[base + k]
+        }
+        curCutoff = tbCutoff[ti]
+        curBeat = tbBeat[ti]
+        curSwell = tbSwell[ti]
+        curSitarBias = tbSitarBias[ti]
+        settledTimbre = Int32(ti)
+        timbreSettled = true
+        fadeMix = 1
+        activeSlots = slotsInUse(ti)
+    }
+
+    /// Whether the spectrum has caught up with the timbre that was asked for. Read
+    /// by the harness; the render loop uses it to skip the whole exercise, which is
+    /// what keeps a feature that is idle 99% of the time free.
+    public private(set) var timbreSettled = true
+
+    /// The spectrum as it is at this instant — one entry per harmonic slot, in the
+    /// order of `TimbreCatalog.harmonics`.
+    ///
+    /// For the harness, and it is the difference between testing this feature and
+    /// guessing at it. Measured through an FFT of the rendered drone, a partial's
+    /// level is confounded by every other pad sounding a harmonic of the same root,
+    /// by the voice lowpass and by the saturation, and lands within about 12 dB —
+    /// which is not a resolution any claim here can be made at. Read from the
+    /// engine the numbers are exact, so "the re-encoding preserves the instrument"
+    /// and "no partial ever steps" become facts rather than impressions.
+    /// Not called from the render thread.
+    public func soundingSpectrum() -> [(ratio: Double, amp: Float)] {
+        (0..<Self.maxPartials).map { (curRatio[$0], curAmp[$0]) }
+    }
+
+    /// What a timbre's slots hold in the catalogue, for the harness to compare the
+    /// above against.
+    public func catalogSpectrum(_ index: Int) -> [(ratio: Double, amp: Float)] {
+        let ti = min(max(index, 0), timbreCount - 1)
+        return (0..<Self.maxPartials).map {
+            (tbRatio[ti * Self.maxPartials + $0], tbAmp[ti * Self.maxPartials + $0])
+        }
+    }
+
+    /// One block's worth of becoming the next timbre.
+    ///
+    /// Amplitudes and ratios both, because inharmonicity is a property of the
+    /// timbre: the same harmonic sits a few cents apart in a stretched spectrum and
+    /// an unstretched one, and gliding between the two is a partial drifting into
+    /// tune over fourteen seconds, against a drone that is already drifting ±9
+    /// cents on its own. Stepping it instead would be the one hard edge left in an
+    /// otherwise continuous change.
+    ///
+    /// A ramp on **smootherstep**, which is the same curve and the same reasoning
+    /// as every move Flow makes: zero velocity *and* zero acceleration at both
+    /// ends, so neither the departure nor the arrival is an event. A one-pole was
+    /// the obvious first choice and was wrong twice over — it never actually
+    /// arrives (measured: fifty seconds to fall below −100 dB of a fourteen-second
+    /// change, so the engine went on crossfading long after the music had stopped
+    /// changing), and it leaves at full speed, which is the end of a transition an
+    /// ear is most likely to catch.
+    ///
+    /// The fade starts from **whatever is sounding**, not from a timbre. That is
+    /// what makes a second change arriving mid-fade a non-event: there is no
+    /// interrupted A→B to reconcile, just a new target and a new fourteen seconds
+    /// from wherever the spectrum had got to.
+    private func advanceTimbre(toward ti: Int, frames n: Int, sampleRate sr: Double) {
+        if Int32(ti) != settledTimbre {
+            for k in 0..<Self.maxPartials {
+                fadeFromAmp[k] = curAmp[k]
+                fadeFromRatio[k] = curRatio[k]
+            }
+            fadeFromCutoff = curCutoff
+            fadeFromBeat = curBeat
+            fadeFromSwell = curSwell
+            fadeFromSitar = curSitarBias
+            fadeMix = 0
+            // Before the fade, and taking both ends: a harmonic only the outgoing
+            // timbre has must go on being rendered all the way down to silence.
+            activeSlots = max(activeSlots, slotsInUse(ti))
+            settledTimbre = Int32(ti)
+            timbreSettled = false
+        }
+        guard !timbreSettled else { return }
+
+        fadeMix = min(1, fadeMix + Double(n) / (max(0.05, timbreSeconds) * sr))
+        guard fadeMix < 1 else { snapTimbre(); return }
+
+        let x = fadeMix
+        let s = x * x * x * (x * (x * 6 - 15) + 10)
+        let sf = Float(s)
+        let base = ti * Self.maxPartials
+        for k in 0..<Self.maxPartials {
+            curAmp[k] = fadeFromAmp[k] + (tbAmp[base + k] - fadeFromAmp[k]) * sf
+            curRatio[k] = fadeFromRatio[k] + (tbRatio[base + k] - fadeFromRatio[k]) * s
+        }
+        curCutoff = fadeFromCutoff + (tbCutoff[ti] - fadeFromCutoff) * s
+        curBeat = fadeFromBeat + (tbBeat[ti] - fadeFromBeat) * s
+        curSwell = fadeFromSwell + (tbSwell[ti] - fadeFromSwell) * s
+        curSitarBias = fadeFromSitar + (tbSitarBias[ti] - fadeFromSitar) * sf
+    }
+
     // MARK: - Voices
 
     private func renderVoices(_ n: Int, _ chL: UnsafeMutablePointer<Float>, _ chR: UnsafeMutablePointer<Float>) {
         let sr = sampleRate
         let mp = Self.maxPartials
+        // Move the sounding spectrum a block's worth closer to the one that has
+        // been asked for. Done once per block rather than per voice: every voice
+        // shares one spectrum, and doing it per voice would advance it 32× too
+        // fast.
         let ti = Int(min(max(timbreIndex, 0), Int32(timbreCount - 1)))
-        let tBase = ti * mp
-        let specCount = Int(tbPartials[ti])
-        let sitarBias = tbSitarBias[ti]
+        advanceTimbre(toward: ti, frames: n, sampleRate: sr)
+        let sitarBias = curSitarBias
+        let slots = activeSlots
 
-        let swellTau = max(0.05, swellSeconds * tbSwell[ti] / 3.0)
+        let swellTau = max(0.05, swellSeconds * curSwell / 3.0)
         let attackCoef = 1.0 - Float(exp(-1.0 / (swellTau * sr)))
         let glideCoef = 1.0 - Float(exp(-1.0 / (max(0.05, glideSeconds) * sr)))
 
@@ -549,10 +760,10 @@ public final class DroneEngine {
         let pluckAtkCoef = 1.0 - Float(exp(-2.2 / (max(0.001, pluckAttack) * sr)))
         let pluckDecCoef = 1.0 - Float(exp(-6.9 / (max(0.02, pluckDecay) * sr)))
 
-        let beatBase = Double(min(max(beating, 0), 1)) * 1.10 * tbBeat[ti]
+        let beatBase = Double(min(max(beating, 0), 1)) * 1.10 * curBeat
         let driftCentsMax = Double(min(max(drift, 0), 1)) * 9.0
         let motionAmt = Double(min(max(motion, 0), 1))
-        let cutoffBase = 320.0 * pow(28.0, Double(min(max(brightness, 0), 1))) * tbCutoff[ti]
+        let cutoffBase = 320.0 * pow(28.0, Double(min(max(brightness, 0), 1))) * curCutoff
         let nyquistish = sr * 0.46
 
         // In spatial mode a voice writes twice: mono into its own bus, which is
@@ -603,26 +814,31 @@ public final class DroneEngine {
                 // voices never swirl together.
                 let apG = Float(0.28 + 0.55 * (0.5 + 0.5 * lfo(t, pSitar * 0.11, off * 5.3)))
 
+                // Slot `p` is one harmonic of `TimbreCatalog.harmonics`, in every
+                // timbre, for the life of the process — so a partial keeps its
+                // oscillator, its phase and its place in the image while the timbre
+                // changes underneath it, and all a timbre change does here is read a
+                // different amplitude out of `curAmp`.
+                //
+                // The ratios ascend, so everything above Nyquist is a suffix and the
+                // loop can simply stop: no packing, and none of the phase-shuffling
+                // that packing used to need.
                 var np = 0
-                for p in 0..<specCount {
-                    let fa = f0 * tbRatio[tBase + p]
-                    if fa > nyquistish { continue }
-                    let fb = fa + beatBase * beatOffset[p]
+                while np < slots {
+                    let fa = f0 * curRatio[np]
+                    if fa > nyquistish { break }
+                    let fb = fa + beatBase * beatOffset[np]
                     incA[base + np] = fa / sr
                     incB[base + np] = fb / sr
 
-                    let amp = tbAmp[tBase + p] * ampMod
-                    let fan = partialFan[p]
+                    let amp = curAmp[np] * ampMod
+                    let fan = partialFan[np]
                     let panA = min(1.0, max(-1.0, fan * 0.9 + voicePan - 0.10))
                     let panB = min(1.0, max(-1.0, fan * 0.9 + voicePan + 0.10))
                     gAL[base + np] = amp * sqrtf(Float(0.5 * (1.0 - panA)))
                     gAR[base + np] = amp * sqrtf(Float(0.5 * (1.0 + panA)))
                     gBL[base + np] = amp * sqrtf(Float(0.5 * (1.0 - panB)))
                     gBR[base + np] = amp * sqrtf(Float(0.5 * (1.0 + panB)))
-                    if np != p {
-                        phaseA[base + np] = phaseA[base + p]
-                        phaseB[base + np] = phaseB[base + p]
-                    }
                     np += 1
                 }
                 vc.partialCount = Int32(np)

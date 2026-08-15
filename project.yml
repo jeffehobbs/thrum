@@ -159,7 +159,7 @@ targets:
         # has seen and bumps past it at export time — which is how an archive of 2
         # became build 3. Keep this current anyway; it is the only record in the repo
         # of what has actually shipped.
-        CURRENT_PROJECT_VERSION: "9"
+        CURRENT_PROJECT_VERSION: "10"
         # Metal shaders are compiled from iOS/Shaders.metal by the default build
         # rule; -O keeps the fragment loop tight, which matters at 5 M pixels.
         MTL_ENABLE_DEBUG_INFO: NO

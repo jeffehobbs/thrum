@@ -498,10 +498,16 @@ The whole design is in the transitions, not the destinations. Two rules:
   ninety seconds on a smootherstep curve — zero velocity *and* zero acceleration
   at both ends — so a change has no edge to notice at either side. The shortest
   slide Flow will open is nine seconds.
-- **The one discontinuous thing is hidden under a breath.** Swapping a timbre
-  recomputes every partial of every voice, which at full level is a lurch. So Flow
-  leans on Swell Ride first, changes the reeds while the drone is down, and brings
-  it back up over fourteen seconds. It reads as the room inhaling.
+- **Nothing is hidden, either.** Swapping a timbre used to be the one genuinely
+  discontinuous edit — every partial of every voice changing level in the same
+  sample — and Flow covered it by dipping the whole drone to 0.22 first, changing
+  the reeds while it was down, and bringing it back. That was the wrong shape of
+  fix and a listener caught it: the dip is itself an event, so it drew attention
+  to the very moment it was covering, and −13 dB was never enough to cover a
+  spectrum swap anyway. The engine crossfades its own spectrum now over fourteen
+  seconds (`timbreSeconds`), no partial ever steps, and Flow simply asks for the
+  new timbre. The general lesson: hiding a discontinuity under a gesture makes the
+  gesture the event — remove the discontinuity instead.
 
 Every gesture runs on its own clock at its own tempo, so nothing lines up:
 parameters drift every ten seconds or so, voicings turn over every two to four
@@ -576,7 +582,7 @@ Repurposing ⏭ is normally a bad idea, but the usual objection doesn't apply: t
 is no next track in a continuous drone, so ⏭ has no honest meaning to displace —
 and what it means to a listener, *"enough of this one, move along"*, is exactly what
 a thumbs-down does. It routes through the same `moveOn` as the on-screen button, so
-it still changes one quality under the nine-second breath; nothing reached from the
+it still changes one quality on that quality's own ramp; nothing reached from the
 lock screen arrives more abruptly than Flow's own gestures. What is lost is
 discoverability, and it can't be bought back: `localizedTitle` is a
 `MPFeedbackCommand` property, not an `MPRemoteCommand` one, so a transport button
@@ -647,11 +653,25 @@ only in what they teach:
 - **Thumbs-down brings the next change forward.** Not a new or special change:
   whichever one Flow had already planned next, simply sooner. That keeps every
   transition on the rails it was always going to run on — the crossfade in `apply`,
-  the glide in `setMode`, the nine-second breath around a timbre — and means the
-  button can never invent an event of its own. What arrives is still shaped by the
-  vote, because every choice Flow makes is weighted by taste. Measured: it changes
-  the drone's character 40 times out of 40, on average 3.6 seconds later, and ten
-  impatient presses in a row do not stack up a queue of changes.
+  the glide in `setMode`, the fourteen-second spectrum crossfade around a timbre —
+  and means the button can never invent an event of its own. What arrives is still
+  shaped by the vote, because every choice Flow makes is weighted by taste.
+  Measured: it changes the drone's character 40 times out of 40, and ten impatient
+  presses in a row do not stack up a queue of changes.
+
+**Reversing a thumb within five seconds is a correction, not a second opinion.**
+These buttons get pressed in a pocket, in the dark, one-handed, 22 points apart;
+hitting the wrong one and the right one a second later is one listener holding one
+opinion, and filing both would put real evidence against every quality of that
+drone *and* its opposite. So a vote is **held for five seconds before it is written
+down** — and thumbs-down does not hurry the next change along either, because the
+whole point of a correction is that the mistaken press leaves no trace, and an
+audible consequence is a trace. The screen says "Corrected — more like this". The
+acknowledgement is immediate; only the consequence waits, and what it triggers is a
+fourteen-second crossfade nobody is timing. Changing your mind *later* is still two
+genuine opinions and both are recorded, which is what the harness's control run
+checks. Measured: a taken-back thumbs-down changes the drone within twelve seconds
+5 times in 30, against 7 in 30 for no press at all and 29 in 30 for a real one.
 
 That second one has a consequence worth knowing about. Flow's four "change the
 character" gestures now **always land on something different from what is sounding**.
