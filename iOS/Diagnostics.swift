@@ -56,6 +56,16 @@ final class FlightRecorder {
             .appendingPathComponent("Thrum/flight.log")
     }
 
+    /// Whether this process has already decided the file's fate. The size check runs
+    /// once, on the first write of a launch, and never again — because running it per
+    /// write meant the file could cross the limit *mid-session* and be deleted between
+    /// two lines of the very evidence being written. That is not hypothetical: the
+    /// 08-21 mark dump tripped it, and the deletion took the session's START line and
+    /// both heartbeats covering the marked anomaly with it. A single session cannot
+    /// approach 512 KB honestly (a walk is a few hundred lines; one mark dump is ~40 KB),
+    /// so bounding the file at launch bounds it, full stop.
+    private var rotated = false
+
     func note(_ message: String) {
         guard let url else { return }
         let line = "\(stamp.string(from: Date()))  \(message)\n"
@@ -63,8 +73,11 @@ final class FlightRecorder {
             let fm = FileManager.default
             try? fm.createDirectory(at: url.deletingLastPathComponent(),
                                     withIntermediateDirectories: true)
-            let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
-            if size > Self.sizeLimit { try? fm.removeItem(at: url) }
+            if !self.rotated {
+                self.rotated = true
+                let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+                if size > Self.sizeLimit { try? fm.removeItem(at: url) }
+            }
             guard let data = line.data(using: .utf8) else { return }
             if let handle = try? FileHandle(forWritingTo: url) {
                 defer { try? handle.close() }
@@ -308,6 +321,7 @@ final class MarkBuffer {
 
     private var level = [Float](repeating: -120, count: capacity)
     private var gaze = [Float](repeating: 0, count: capacity)
+    private var yaw = [Float](repeating: 0, count: capacity)
     private var raw = [Float](repeating: 0, count: capacity)
     private var interval = [Float](repeating: 0.01, count: capacity)
     private var write = 0
@@ -315,12 +329,18 @@ final class MarkBuffer {
 
     /// Written by the host, read on the audio thread.
     var currentGaze: Double = 0
+    /// The field's own yaw — its heading deviation, the axis the 08-21 diagnosis had
+    /// to infer from tilt alone because nothing recorded it. Both smoking guns in that
+    /// mark were yaw-side errors surfacing as elevation; this column is what would
+    /// have said so directly.
+    var currentYaw: Double = 0
     var currentRaw: Double = 0
 
     func record(_ db: Float, seconds: Float) {
         let i = write % Self.capacity
         level[i] = db
         gaze[i] = Float(currentGaze)
+        yaw[i] = Float(currentYaw)
         raw[i] = Float(currentRaw)
         interval[i] = seconds
         write += 1
@@ -341,20 +361,20 @@ final class MarkBuffer {
         let stop = write - filled
         while i >= stop {
             var peak: Float = -200, trough: Float = 200
-            var g: Float = 0, r: Float = 0
+            var g: Float = 0, y: Float = 0, r: Float = 0
             var span = 0.0
             var n = 0
             while i >= stop, span < bucket {
                 let k = ((i % Self.capacity) + Self.capacity) % Self.capacity
                 peak = max(peak, level[k]); trough = min(trough, level[k])
-                g = gaze[k]; r = raw[k]
+                g = gaze[k]; y = yaw[k]; r = raw[k]
                 span += Double(interval[k])
                 n += 1
                 i -= 1
             }
             guard n > 0 else { break }
-            rows.append(String(format: "    -%4.1fs  %6.1f…%6.1f dB   gaze %+4.0f°  raw %+4.0f°",
-                               agoEnd + span, trough, peak, g, r))
+            rows.append(String(format: "    -%4.1fs  %6.1f…%6.1f dB   gaze %+4.0f°  yaw %+4.0f°  raw %+4.0f°",
+                               agoEnd + span, trough, peak, g, y, r))
             agoEnd += span
         }
         return rows.reversed()

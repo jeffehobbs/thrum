@@ -113,12 +113,13 @@ public struct HeadStep {
 /// where elevation is carried by pinna notches at 5–10 kHz. The guard was doing its
 /// job on a lie.
 ///
-/// Why pitch reaches ±90° at all, given nobody looks straight up on a trail: it is
+/// Why pitch reached ±90° at all, given nobody looks straight up on a trail: it was
 /// *relative* pitch, measured from a reference captured on the first sample after
-/// `start()` — i.e. while the listener is looking down at the phone to press it.
-/// That offsets the whole session by 50–60°, so an ordinary nod crosses vertical.
-/// Referenced to the horizon it never comes close. `HeadTracker.recenter()` is the
-/// user-facing cure for that, and now also the only thing the bias still costs.
+/// `start()` — i.e. while the listener was looking down at the phone to press it.
+/// That offset the whole session by 50–60°, so an ordinary nod crossed vertical.
+/// As of 08-21 that reference no longer exists: elevation is gravity-anchored per
+/// sample and only the yaw heading is referenced — see `HeadTracker.leak` — so the
+/// smoother's input can only reach ±90° if the head genuinely does.
 ///
 /// Carrying a quaternion removes the failure mode instead of damping it: there is
 /// no chart to fall off, `simd_slerp` takes the short way round on all three axes
@@ -289,6 +290,27 @@ public struct HeadSmoother {
         return simd_quatd(angle: a, axis: v / a)
     }
 
+    /// The twist of a rotation about an axis — the pure rotation about `axis`
+    /// contained in `q`, with the swing (everything about any perpendicular axis)
+    /// divided off.
+    ///
+    /// This is how the heading leak is seeded: the head's yaw about the world's
+    /// vertical, with its pitch and roll never entering. Both decompositions share
+    /// it — `q = twist · swing` and `q = swing′ · twist` have the *same* twist, only
+    /// conjugated swings — so no order convention is needed here.
+    ///
+    /// Degenerate when the rotation carries the axis to its opposite (a 180° swing),
+    /// where "how much of this is yaw" genuinely has no answer; identity is returned
+    /// and a caller seeding from it starts dead ahead, which is the only honest
+    /// choice available.
+    public static func twist(_ q: simd_quatd, about axis: simd_double3) -> simd_quatd {
+        let proj = simd_dot(q.imag, axis) * axis
+        let t = simd_double4(proj.x, proj.y, proj.z, q.real)
+        let len = simd_length(t)
+        guard len > 1e-9 else { return identity }
+        return simd_quatd(vector: t / len)
+    }
+
     /// One step of the drift leak: the correction moved a little way toward the
     /// current orientation, yaw and elevation at their own rates.
     ///
@@ -447,65 +469,56 @@ public final class HeadTracker: ObservableObject {
     public var onOrientation: ((HeadOrientation) -> Void)?
 
     private let manager = CMHeadphoneMotionManager()
-    /// Where "forward" is. Held as a `CMAttitude` rather than three angles
-    /// because recentring is a rotation composition, and rotations do not
-    /// compose by subtracting Euler angles — doing that is only right for tiny
-    /// deviations and goes visibly wrong further out (a head barely tilted can
-    /// report ninety degrees of roll). `multiply(byInverseOf:)` does it properly.
-    private var reference: CMAttitude?
 
-    /// How much of the referenced orientation is drift rather than head, and the
-    /// vertical it is measured against.
+    /// The leaky *heading* — a pure twist about the world's vertical, and the only
+    /// reference this tracker keeps.
     ///
-    /// The 08-14 flight log is what these are for. Every one of six listener marks sat
-    /// at an extreme *referenced* gaze — median 49–65°, |gaze| over 45° for 80.6% of
-    /// the fifteen seconds before each press against 33.3% for the rest of the walk —
-    /// while **raw** gaze stayed inside an ordinary neck's range the whole time
-    /// (median +27° against a +25° baseline). Referenced minus raw drifted from about
-    /// 0° to +40° over five minutes, and output level fell monotonically with the
-    /// referenced angle (median −14.9 → −18.4 dB, p10 −18.1 → −23.0) while showing no
-    /// relationship at all to the raw one. So the head was not where the field thought
-    /// it was, and it was the reference that had moved — which is the test
-    /// `rawSpread`'s doc comment was written to make, arriving at the answer it names.
+    /// **Elevation and roll are never referenced at all, and that is the 08-21 fix.**
+    /// The tracker used to divide a full attitude out of every sample: a reference
+    /// captured on the first sample after `start()`, plus this leak chasing the whole
+    /// referenced orientation (elevation τ 30 s, yaw τ 120 s). Mark #1 of the 08-21
+    /// walk caught what that costs: the orientation handed to the environment node sat
+    /// at **+69…+76° elevation for two full seconds while the raw head sat at
+    /// +22…27°**, moved *opposite* to the head, then snapped 67° in half a second —
+    /// twice in the marked window — with overruns, gaps, stalls and clamped all at
+    /// zero. Sixteen HRTFs pointed at a phantom extreme elevation is heard as tones
+    /// flickering and cutting out (pinna notches at 5–10 kHz sweeping the partials),
+    /// while the tap's level barely moves, which is exactly what the log showed.
     ///
-    /// `recenter()` is the cure it names too, but calling it on a timer would be the
-    /// wrong cure: it snaps, deliberately — it pushes `.identity` out and nils
-    /// `lastSample` so the slew limit cannot smooth what follows, because a listener
-    /// who presses a button is expecting exactly that. On a timer the same snap is
-    /// unannounced, and `maxDegreesPerSecond`'s own doc comment already lists "a
-    /// reference re-seated mid-movement" among the discontinuities it exists to catch.
-    /// Scheduling one every thirty seconds would manufacture the artefact this is
-    /// meant to remove.
+    /// The mechanism was structural, not a bad constant: elevation was derived
+    /// entirely from `leak⁻¹ · rel` — two orientation-referenced quantities — so any
+    /// yaw-side error (the sensor re-seating its own drifting yaw frame, the leak
+    /// lagging a held turn, an oblique start reference) conjugated into *elevation*,
+    /// the axis the ear is most sensitive to and the readout least able to see: a
+    /// world-yaw re-seat is invisible in the raw tilt column. Offline replay of the
+    /// transport reproduced each signature: a +120° world-yaw step through a
+    /// reference pitched −50° arrives as a ~32° elevation step, holds while the leak
+    /// drains it, and steps back when the sensor seats again.
     ///
-    /// So the reference is not re-seated at all — it *leaks*. Each sample this
-    /// correction slerps a little way toward the current orientation, which drains
-    /// drift continuously and never produces an event to hear. The cost is that a leak
-    /// cannot tell drift from intent: hold a deliberate turn and the field slowly
-    /// decides that is forward. That is the trade, and it is worth taking at these
-    /// numbers — the residual against a constant drift is just rate × τ, so the
-    /// measured 0.13°/s leaves ~4° on elevation and ~16° on yaw, against the 40° that
-    /// cost 5 dB at p10.
+    /// So the swing now comes from gravity and only the twist is referenced:
     ///
-    /// Two time constants because the two axes are not symmetrical in use. Nobody
-    /// holds an extreme *elevation* glance, so elevation can be drained briskly; people
-    /// hold *yaw* glances constantly — watching something to the side while walking —
-    /// so yaw is drained four times slower, where the leak is least likely to be wrong
-    /// about what it is looking at.
+    /// - **Pitch and roll** are taken from the attitude's own gravity-referenced
+    ///   swing, per sample, absolutely. There is no reference to bias them, no leak
+    ///   to drain them, and no path by which yaw error can become elevation. The
+    ///   field's elevation equals the head's true elevation, which a neck bounds to
+    ///   roughly ±70° — the ±90° pole, where azimuths whip, is unreachable.
+    /// - **Yaw** has no absolute observation (gravity cannot see it, and AirPods yaw
+    ///   genuinely drifts), so it is measured against this leaky heading: seeded from
+    ///   the head's twist on the first sample, drained toward the current twist with
+    ///   the same ~120 s time constant as before. The cost is unchanged — hold a
+    ///   deliberate turn and the field slowly decides that is forward — and the
+    ///   old elevation-leak cost (37% of an up-glance kept at 30 s) is simply gone:
+    ///   look up and the field now stays put, which is what a stable room does.
+    ///
+    /// `recenter()` still snaps deliberately — it re-seats the heading and resets the
+    /// smoother, because a listener who presses a button expects exactly that. On a
+    /// schedule the same snap would be an event nobody asked for; the leak exists so
+    /// it never has to happen on one.
     private var leak = HeadSmoother.identity
-    /// World up in the reference frame, taken from gravity at the moment the reference
-    /// is captured.
-    ///
-    /// Not simply `(0, 0, 1)`, and that is load-bearing. The reference is a *head*
-    /// attitude, captured on the first sample after `start()` — i.e. while the listener
-    /// is looking down at the phone to press it, which is what tilts the whole session
-    /// by 50–60° in the first place. Its z is therefore 50–60° off the true vertical,
-    /// and splitting yaw from elevation about it would mix each into the other and
-    /// apply both time constants to the wrong thing. `CMDeviceMotion.gravity` is in the
-    /// device frame, so at the instant of capture it *is* the reference frame's own
-    /// reading of which way is down — the one moment the two frames coincide.
-    private var upInReference: simd_double3?
-    /// Elevation drains with a ~30 s time constant, yaw with ~120 s — see `leak`.
-    private static let elevationLeak = 30.0
+    /// Re-seat the heading from the next sample's twist — set at start and by
+    /// `recenter()`, never on a schedule.
+    private var needsHeading = true
+    /// Yaw drains with a ~120 s time constant — see `leak`.
     private static let yawLeak = 120.0
 
     private var lastPublish = Date.distantPast
@@ -645,23 +658,19 @@ public final class HeadTracker: ObservableObject {
         }
     }
 
-    /// The gaze as the *field* sees it — after the session reference is divided out.
-    /// This is the number that spanned 179°.
+    /// The gaze as the *field* sees it — what the smoother is actually pointing the
+    /// node at. This is the number that spanned 179° under the old full-attitude
+    /// reference, and that sat at +76° against a +26° head on 08-21.
     public private(set) var tiltSpread = TiltHistogram()
-    /// The gaze as the *sensor* reports it, before any reference is applied.
+    /// The gaze as the *sensor* reports it, absolutely — gravity-referenced, so a
+    /// neck bounds it to roughly ±70°.
     ///
-    /// This is the discriminator, and it is the whole point of the pair. CoreMotion's
-    /// attitude is gravity-referenced, so raw gaze elevation is an absolute statement
-    /// about where the head is pointing relative to the horizon, and a neck bounds it
-    /// to roughly ±70°. The referenced figure is that same head minus a reference
-    /// captured once, at `start()`, while the listener was looking down at the phone
-    /// to press play.
-    ///
-    /// So: if raw stays inside a neck's range while referenced spans 179°, the
-    /// reference is what moved and `recenter()` is the cure. If raw spans it too, the
-    /// sensor is reporting more pitch than the head has and no amount of re-referencing
-    /// will help. One log line now separates two explanations that have been
-    /// indistinguishable all week.
+    /// This pair was built as a discriminator between reference drift and sensor
+    /// fault, and it twice named the culprit. Under the 08-21 design its job
+    /// inverts: elevation is now *taken from* the raw figure (a heading twist cannot
+    /// move tilt), so the two histograms should agree to within smoothing lag, and
+    /// any future walk on which they part company again means an error has found a
+    /// new path onto the elevation axis.
     public private(set) var rawSpread = TiltHistogram()
     /// The most recent raw gaze elevation, for instrumentation that samples rather
     /// than aggregates — see `MarkBuffer`.
@@ -736,8 +745,7 @@ public final class HeadTracker: ObservableObject {
 
     public func stop() {
         manager.stopDeviceMotionUpdates()
-        reference = nil
-        upInReference = nil
+        needsHeading = true
         leak = HeadSmoother.identity
         smoothed = .identity
         smoother = HeadSmoother()
@@ -761,12 +769,12 @@ public final class HeadTracker: ObservableObject {
     /// Take the current head position as "facing forward". AirPods yaw drifts,
     /// so this is not a nicety — it is how the field gets put back in front of
     /// you, and it wants to be one obvious button.
+    ///
+    /// Only the heading is re-seated — elevation comes from gravity and was never
+    /// wrong, so the button has nothing to say about it. The field glides in from
+    /// dead ahead and settles at the head's true tilt.
     public func recenter() {
-        reference = nil
-        // Both re-derived from the next sample, alongside the reference itself. The
-        // leak drains drift; it is not a second opinion about where forward is, and
-        // carrying it across an explicit recentre would have it argue with the button.
-        upInReference = nil
+        needsHeading = true
         leak = HeadSmoother.identity
         smoothed = .identity
         smoother = HeadSmoother()
@@ -779,23 +787,29 @@ public final class HeadTracker: ObservableObject {
 
     private func ingest(_ attitude: CMAttitude, gravity: simd_double3,
                         at timestamp: TimeInterval) {
-        // Copy, or the first frame's reference would be mutated by the very
-        // call that uses it and every angle after it would be nonsense.
-        // Before the reference is divided out — `multiply(byInverseOf:)` mutates the
-        // attitude in place, so this is the only moment the sensor's own, gravity-
-        // referenced orientation is still available.
-        let rawQuat = attitude.quaternion
+        // `quaternion`, not `yaw`/`pitch`/`roll`. Reading the Euler angles here is
+        // what put a 168° step into a stream whose underlying rotation never moved
+        // faster than a walk — see `HeadSmoother`. The quaternion has no chart and so
+        // no singularity to fall into.
+        let q = attitude.quaternion
+        let att = simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w)
 
-        if reference == nil {
-            reference = attitude.copy() as? CMAttitude
-            // The one instant the device frame and the reference frame are the same,
-            // so the only instant gravity can be read straight into the latter.
-            let g = simd_length(gravity) > 0.1 ? -simd_normalize(gravity) : simd_double3(0, 0, 1)
-            upInReference = g
-            leak = HeadSmoother.identity
+        // The world's vertical, as the sensor itself measures it this sample.
+        // Gravity arrives in the device frame; carried through the attitude it is
+        // the vertical of the frame the attitude lives in — so the twist axis rests
+        // on a measurement, not on the reference-frame contract. The fallback is
+        // that contract (headphone attitude is z-vertical), for the odd sample
+        // where gravity hasn't settled.
+        let up = simd_length(gravity) > 0.1
+            ? -simd_normalize(att.act(gravity))
+            : simd_double3(0, 0, 1)
+
+        // Seed the heading from the head's own twist — pitch and roll never enter,
+        // so there is nothing here for a looking-down-at-the-phone start to bias.
+        if needsHeading {
+            leak = HeadSmoother.twist(att, about: up)
+            needsHeading = false
         }
-        guard let ref = reference else { return }
-        attitude.multiply(byInverseOf: ref)
 
         let dt = lastSample.map { max(timestamp - $0, 0.001) } ?? 0.04
         // Before the smoother, and against the *previous* tilt: the interesting
@@ -810,26 +824,20 @@ public final class HeadTracker: ObservableObject {
         }
         lastSample = timestamp
 
-        // `quaternion`, not `yaw`/`pitch`/`roll`. Reading the Euler angles here is
-        // what put a 168° step into a stream whose underlying rotation never moved
-        // faster than a walk — see `HeadSmoother`. The quaternion has no chart and so
-        // no singularity to fall into.
-        let q = attitude.quaternion
-        let rel = simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w)
+        // Divide the heading out on the left — a rotation in the world frame, where
+        // the vertical lives — and hand the smoother what is left: the head's true
+        // gravity swing, plus its yaw relative to the leaky heading. A nod is a pure
+        // pitch of this quantity at any heading, and nothing that happens on the yaw
+        // axis — a sensor re-seat, a held turn — can reach its elevation, because
+        // `leak` is a twist about the very axis elevation is measured from.
+        let corrected = leak.conjugate * att
 
-        // Drain the drift, then hand the smoother what is left — see `leak`.
-        //
-        // Composed on the *left* throughout, which is what makes the vertical mean
-        // anything: left multiplication is a rotation in the reference frame, where
-        // `upInReference` lives, and right multiplication would be one in the head's
-        // own, where the split would follow the head around. The correction the field
-        // sees and the error the leak chases are the same quantity — `leak⁻¹ · rel` —
-        // so when the leak has caught up the field is dead ahead, by construction.
-        let corrected = leak.conjugate * rel
-        if let up = upInReference {
-            leak = HeadSmoother.leaked(leak, toward: rel, up: up, dt: dt,
-                                       elevation: Self.elevationLeak, yaw: Self.yawLeak)
-        }
+        // Then drain the heading toward the head's current twist. `elevation: .infinity`
+        // is the 08-21 design, not a placeholder: the swing is absolute now, so there
+        // is no elevation drift to drain and the leak must never acquire a component
+        // off the vertical.
+        leak = HeadSmoother.leaked(leak, toward: att, up: up, dt: dt,
+                                   elevation: .infinity, yaw: Self.yawLeak)
 
         let out = smoother.step(rotation: corrected, dt: dt)
         smoothed = out.head
@@ -839,15 +847,13 @@ public final class HeadTracker: ObservableObject {
         if abs(tilt) > abs(peakTilt) { peakTilt = tilt }
         tiltSpread.add(tilt)
         // The same measurement on the unreferenced attitude, through the same frame
-        // change, so the two numbers are directly comparable.
+        // change, so the two numbers are directly comparable. Under the 08-21 design
+        // they *should* now agree to within smoothing lag — the heading is a twist and
+        // twists cannot move tilt — so these diverging on a future walk is the alarm
+        // that something has crept back onto the wrong axis.
         rawTilt = Self.tilt(HeadOrientation(
-            orientation: HeadSmoother.listener(simd_quatd(ix: rawQuat.x, iy: rawQuat.y,
-                                                          iz: rawQuat.z, r: rawQuat.w)),
-            yaw: 0, pitch: 0, roll: 0))
-        rawSpread.add(Self.tilt(HeadOrientation(
-            orientation: HeadSmoother.listener(simd_quatd(ix: rawQuat.x, iy: rawQuat.y,
-                                                  iz: rawQuat.z, r: rawQuat.w)),
-            yaw: 0, pitch: 0, roll: 0)))
+            orientation: HeadSmoother.listener(att), yaw: 0, pitch: 0, roll: 0))
+        rawSpread.add(rawTilt)
 
         // Rotating the *listener* with the head is what leaves the sources
         // standing still in the room.

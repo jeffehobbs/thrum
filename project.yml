@@ -62,11 +62,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrum
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
-        MARKETING_VERSION: "1.4.0"
+        MARKETING_VERSION: "1.4.1"
         # Sparkle orders releases by CFBundleVersion, not by the marketing
         # string, so this is the number that decides whether an installed copy
         # thinks an update exists. It must go up every single release.
-        CURRENT_PROJECT_VERSION: "7"
+        CURRENT_PROJECT_VERSION: "8"
 
   # Thrum Flow — the passive iOS/iPadOS build. Same engine, no instrument: Flow
   # plays it and a Metal field shows what it is doing.
@@ -159,7 +159,7 @@ targets:
         # has seen and bumps past it at export time — which is how an archive of 2
         # became build 3. Keep this current anyway; it is the only record in the repo
         # of what has actually shipped.
-        CURRENT_PROJECT_VERSION: "11"
+        CURRENT_PROJECT_VERSION: "12"
         # Metal shaders are compiled from iOS/Shaders.metal by the default build
         # rule; -O keeps the fragment loop tight, which matters at 5 M pixels.
         MTL_ENABLE_DEBUG_INFO: NO

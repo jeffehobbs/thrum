@@ -395,6 +395,9 @@ final class FlowHost: ObservableObject {
         let gaze = asin(max(-1, min(1, Double(f.y)))) * 180 / .pi
         dropoutWatch.gaze = gaze
         markBuffer.currentGaze = gaze
+        // The Euler readout is display-grade, but yaw at the tilts a neck can hold is
+        // well-conditioned, and this only has to say which axis an event was on.
+        markBuffer.currentYaw = head.yaw
         markBuffer.currentRaw = model.head.rawTilt
         environment.listenerVectorOrientation = want
     }
