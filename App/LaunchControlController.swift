@@ -1,19 +1,20 @@
 import Foundation
 import Combine
 
-/// Novation Launch Control / Launch Control XL.
+/// Novation Launch Control / Launch Control XL / Launch Control XL 3.
 ///
-/// The hardware isn't here yet, so this is written to need nothing from the
-/// player when it does arrive: plug it in, and its knobs land on Thrum's
+/// Nothing is asked of the player: plug in, and the knobs land on Thrum's
 /// parameters in a sensible default order (the same order the app shows them).
 /// Anything you'd rather have somewhere else, you re-learn from the app.
 ///
-/// Two details that matter live:
+/// Three details that matter live:
 ///  * **Soft takeover.** A knob does nothing until it passes through the
 ///    parameter's current value, so grabbing a knob never jumps the sound.
-///  * **Templates.** Both devices ship several templates with different CCs.
+///  * **Templates.** These devices ship several templates with different CCs.
 ///    The defaults below are the factory template; learn overrides them and
 ///    persists, so a different template is one pass through the panel away.
+///  * **Generations differ.** Not just in CC numbers — the XL 3 also renames its
+///    ports past recognition and sends CC where the others send note-on.
 @MainActor
 final class LaunchControlController: ObservableObject {
     private unowned let model: ThrumModel
@@ -27,12 +28,26 @@ final class LaunchControlController: ObservableObject {
     /// Knobs that haven't yet passed through their parameter's value.
     private var takenOver: Set<Int> = []
     private var lastKnob: [Int: Double] = [:]
+    /// Set on connect — the XL 3 needs a different CC map *and* a different
+    /// button convention from its predecessors.
+    private var isXL3 = false
 
     private static let defaultsKey = "ThrumLaunchControlMap"
 
-    /// Factory-template CCs, in physical order.
+    /// Factory-template CCs, in physical order: knob rows top to bottom, then
+    /// the faders. Every generation numbers them differently.
     private static let xlCCs: [Int] = Array(13...20) + Array(29...36) + Array(49...56) + Array(77...84)
     private static let miniCCs: [Int] = Array(21...28) + Array(41...48)
+    /// XL 3, measured from the hardware 2026-08-24 rather than taken from the
+    /// docs: its knob rows are contiguous (13–36, where the older XL skipped to
+    /// 49–56 for the third row) and its faders sit *below* the knobs at 5–12.
+    private static let xl3CCs: [Int] = Array(13...20) + Array(21...28) + Array(29...36) + Array(5...12)
+    /// The XL 3's buttons send CC at value 127, not note-on like every earlier
+    /// model, so they need routing into the pad handler by hand. Kept to the
+    /// range actually measured: a CC that lands here fires a voicing — or the
+    /// panic — so guessing wide would risk phantom presses from some control
+    /// this has never seen. Widen it if more buttons turn up.
+    private static let xl3ButtonCCs = 37...47
 
     /// The order knobs get assigned in — matches how the app groups them, so
     /// the top row of the hardware is the top group on screen.
@@ -47,7 +62,9 @@ final class LaunchControlController: ObservableObject {
     init(model: ThrumModel) {
         self.model = model
         surface = MIDISurface(
-            clientName: "ThrumLC", deviceName: "Launch Control",
+            clientName: "ThrumLC",
+            deviceNames: ["Launch Control", "LCXL", "Launchpad Control XL"],
+            portHint: "MIDI",
             onConnect: { [weak self] ok in
                 Task { @MainActor in
                     guard let self else { return }
@@ -70,11 +87,22 @@ final class LaunchControlController: ObservableObject {
     // MARK: - Mapping
 
     private func buildDefaultMapping() {
+        // The generation has to be read even when a learned map wins, because it
+        // also decides how the buttons are decoded.
+        let name = surface.connectedName
+        // The older models report "Launch Control" and the XL appends " XL", but
+        // the XL 3 reports neither — it names its ports "LCXL3 1 MIDI Out".
+        isXL3 = name.localizedCaseInsensitiveContains("LCXL3")
+            || name.localizedCaseInsensitiveContains("XL 3")
         guard mapping.isEmpty else { return }  // a learned map wins
-        // Both models report "Launch Control"; the XL appends " XL", and it has
-        // twice the knobs on entirely different CCs.
-        let isXL = surface.connectedName.localizedCaseInsensitiveContains("XL")
-        let ccs = isXL ? Self.xlCCs : Self.miniCCs
+        let ccs: [Int]
+        if isXL3 {
+            ccs = Self.xl3CCs
+        } else if name.localizedCaseInsensitiveContains("XL") {
+            ccs = Self.xlCCs
+        } else {
+            ccs = Self.miniCCs
+        }
         for (i, param) in Self.assignOrder.enumerated() where i < ccs.count {
             mapping[ccs[i]] = param
         }
@@ -112,6 +140,12 @@ final class LaunchControlController: ObservableObject {
     private func handle(_ m: MIDISurface.Message) {
         switch m.kind {
         case .control:
+            // XL 3 buttons arrive as CC. Learning still comes first, so a button
+            // can be bound deliberately, but otherwise they act as pads.
+            if isXL3, learning == nil, Self.xl3ButtonCCs.contains(m.data1) {
+                if m.data2 > 0 { pad(note: m.data1 - Self.xl3ButtonCCs.lowerBound) }
+                return
+            }
             knob(cc: m.data1, value: m.data2)
         case .noteOn:
             pad(note: m.data1)

@@ -49,6 +49,12 @@ what it's doing, no instrument surface at all. Both share `Shared/` verbatim; on
 transport code and iOS just asks `AVAudioSession`. One build covers iPhone and iPad
 (`TARGETED_DEVICE_FAMILY "1,2"`), so there is no separate iPadOS target.
 
+Two local packages are expected as siblings of this checkout —
+[`../ensemble`](https://github.com/jeffehobbs/ensemble) (Mac target),
+[`../cadence`](https://github.com/jeffehobbs/cadence) (iOS target) — plus Sparkle,
+which XcodeGen fetches. A missing sibling fails at `xcodegen generate` rather than at
+build time, which is at least unambiguous.
+
 Installing on a device needs no Xcode GUI and no cable if the phone is paired over
 Wi-Fi — Developer Mode on, an *Apple Development* certificate (separate from the
 Developer ID used for notarising), then:
@@ -693,6 +699,81 @@ rather than Flow plus whatever was liked last week.
 
 ---
 
+## Settings — the gear (ThrumFlow)
+
+The iOS app has three controls on its own screen, on the principle that Flow decides
+and the listener listens. Two questions do not survive that principle, because neither
+is knowable from the outside and both change what the app does materially — so they
+live behind a small gear in the top corner, which fades with the rest of the controls.
+
+### Tempo follows user activity
+
+On by default, and the same switch every Phonotropic app has. On, the tempo comes
+from the listener's heart rate, through [Cadence](https://github.com/jeffehobbs/cadence)
+— the same library Meter uses, and the same tuning screen. Off, a slider sets it.
+Either way the tempo is Cadence's rather than Flow's on the phone: Flow still
+chooses everything else.
+
+A phone has no pulse sensor, so Cadence answers in three cases with one number: a
+HealthKit sample from the last ninety seconds (**measured**), an older one carried
+forward by how much the model says has changed since (**extrapolated**), or, on the
+common day when nothing is measuring anything, an estimate from pace, movement,
+climbing and time of day fitted to this listener (**modeled**). The settings screen
+says which of the three it is currently on, because "your pulse" and "our guess at
+your pulse" are different claims.
+
+Two numbers are Thrum's rather than the library's:
+
+- **The fold window is 52…104**, not Cadence's default 62…148. That is a drum
+  machine's range; Thrum's pulse presets live between 48 and 108 and Flow roams
+  46…88. One octave centred on where a drone's arpeggios actually sit is also wide
+  enough that an ordinary day — resting to a brisk walk — never folds at all. Folding
+  is exact rather than approximate (a pulse of 120 *is* 60) but it is still an
+  audible halving, and the fewer of them the better.
+- **The mapping is read-modify-written, never replaced.** `trim` lives on the mapping
+  but is a fact about the *body* — "the estimate reads high" — and travels between the
+  Phonotropic apps in the shared App Group. Assigning a fresh `TempoMapping` on launch
+  would throw away a correction the listener made in Meter, silently, every time.
+
+What is shared and what is not follows from what the data is about: **observations are
+about the body** and are common to Thrum, Meter and the rest, so a newly installed app
+knows the listener on its first run; **the mapping is about the music** and stays
+private, because one app counting a heartbeat as a bar and another as a quarter note
+must not share a range.
+
+The refusal that makes it work sits in `ThrumModel.set(_:_:)`, next to the ensemble's:
+
+```swift
+if p == .tempo, !tempoIsWriting, tempoIsFollowed { return }
+```
+
+Flow's tempo arc, a preset's own bpm and a tap all arrive at that one function, so one
+line covers all three — and `setFollowedTempo` is the only door through it. Putting the
+guard on the iOS host instead would have covered whichever writer somebody remembered.
+Cadence's own smoothing holds a jump until it is confirmed and follows a climbing pulse
+as it climbs, so nothing smooths it a second time.
+
+The Health and Motion prompts are asked on the first play rather than at launch.
+Cadence runs only while the drone is playing, and reads its sensors only while the
+switch is on — the pedometer and the HealthKit query cost what the head tracker
+costs, and following the pulse of a listener who is not listening buys nothing.
+
+### Head tracking
+
+On by default, which is what every build before this one did unconditionally. Turning
+it off is a real request rather than a tidy-up: this is the one thing in the app that
+reads a sensor continuously, and a listener who wants the drone welded to their ears —
+on a train, lying down, or simply because they prefer it — had no way to say so.
+
+The switch is the *first* of the three conditions in `updateHeadTracking`, ahead of
+"playing" and "not on speakers", so off means the sensor is never read rather than read
+and ignored. The screen says what the field is actually doing as well as what the
+switch says, because a switch that is on while the phone is playing through its own
+speaker is tracking nothing, and saying so is what stops that reading as a broken
+feature.
+
+---
+
 ## Spatial — the drone around you
 
 Sixteen mono buses placed around your head and rendered binaurally, instead of
@@ -706,8 +787,11 @@ walking up a column therefore climbs as well as rises in pitch, and a lane
 walking across the mode orbits you. Four lanes at four rates become four orbits
 at four speeds.
 
-**Head tracking** (`⌥⌘H`) reads AirPods orientation and counter-rotates the
-listener, so the drone stays where it is in the room when you turn your head.
+**Head tracking** (`⌥⌘H` on the Mac, a switch behind the gear on the phone) reads
+AirPods orientation and counter-rotates the listener, so the drone stays where it is in
+the room when you turn your head. The field turns on the audio clock, one orientation
+per render cycle, however the sensor delivers — see
+[Two clocks, one field](#two-clocks-one-field).
 **Recenter** (`⌥⌘R`) takes wherever you are looking as straight ahead — AirPods
 yaw drifts, so this is the button you will actually use.
 
@@ -907,7 +991,7 @@ things worth not re-deriving:
 - **The handedness fix is a pure change of frame.** The long-standing
   `(-yaw, -pitch, -roll)` is exactly a 180° rotation about (0, 1, 1)/√2, which
   sends CoreMotion's (right, forward, up) onto the node's (−x, z, y). It is now one
-  conjugation in `HeadSmoother.toListener` rather than a negation in each host.
+  conjugation in `HeadMath.toListener` rather than a negation in each host.
 - **Ask the node rather than the documentation.** Setting
   `listenerAngularOrientation` and reading `listenerVectorOrientation` back makes
   `AVAudioEnvironmentNode` state its own mapping: `Ry(−yaw)·Rx(pitch)·Rz(−roll)`.
@@ -926,6 +1010,43 @@ below — first asserts that the test trajectory *does* contain the bug: the hea
 turns 60° in total while its Euler angles jump 180° in one sample. A version of
 this check that measured Euler angles rather than the vectors the node is driven
 with would have called the artifact a real movement, and the fix a regression.
+
+### Two clocks, one field
+
+The transport used to run entirely on the sensor's schedule: every CoreMotion
+callback smoothed, limited and *wrote to the environment node*, with a dead band
+and a 45 ms rate cap in the host deciding which writes went through. The node only
+ever *applies* an orientation at the start of a render cycle, so three unrelated
+timers were involved — AirPods at 50 Hz, the cap at 22 Hz, the render cycle at
+whatever the IO buffer made it — and what the ear got was the head's path sampled
+by the beat between them. `Tools/spatial` reconstructs that chain against a steady
+100°/s turn: the field is frozen on 65% of render cycles and then jumps three
+cycles' worth. Every smoothing constant had been tuned against that stutter without
+anyone knowing it was there.
+
+Now the sensor only *deposits* a target (`HeadTransport.ingest`) and the render
+clock advances the field toward it (`HeadTransport.advance`): the host's pump ticks
+`HeadTracker` once per cycle, a dedicated thread steps the smoother by the true
+elapsed time and hands the node exactly one orientation, which the next cycle
+applies. The same turn now moves the field on every cycle by within 12% of a
+cycle's worth. A stall in the motion stream is no longer a special case — the
+target stops changing, then jumps, and the slew limit polices the catch-up at the
+audio clock's cadence like any other movement — so `maxCatchUpInterval` is gone.
+
+Two host settings go with it, both decided by `Tools/handover` against the node
+itself on a 63°/s look-around:
+
+- **`.HRTFHQ`, not `.HRTF`, on both platforms.** Plain HRTF snaps to a filter grid and
+  crossfades at each hand-over, so its high band flickers *more* the more often it
+  is handed an orientation (0.245 dB per 10 ms at 480-frame cycles, 0.066 at 4096).
+  HRTFHQ interpolates and goes the other way, reaching 0.055 at 1024 frames — under
+  plain HRTF's best at any cycle length — and holds a 1760 Hz partial to 2¢ against
+  HRTF's 7¢. Two cents is about the physical Doppler of a turning head.
+- **A 1024-frame buffer while tracking.** The cycle is now also the step size of
+  every head movement, and 85 ms is 8.5° per step at 100°/s. `FlowHost` asks for
+  ~21 ms while head tracking is active on headphones and keeps the long buffer
+  otherwise, because twelve wakeups a second is still right for a head-locked field.
+  The Mac never asks for a buffer; CoreAudio's default 512 frames is already there.
 
 Two lessons from this suite that cost real time:
 
@@ -998,3 +1119,41 @@ iOS/      ThrumFlowApp the scene, and FlowHost.shared            (iOS/iPadOS)
           FieldArtwork the same field in Core Graphics, for the car
           CarPlay      the templates
 ```
+
+## Ensemble — playing with the other two
+
+Thrum, Meter and Echo share one tempo, one key and one downbeat while they run
+side by side, so the three can be played together as one instrument. See
+`../ensemble/README.md`; the package is macOS-only, and ThrumFlow has none of
+this.
+
+The strip along the bottom of the window is the whole control: one pill per
+parameter, each with a menu offering **Off**, **Follow** or **Lead**. The fill
+says which — hollow is off, outlined is following, filled is leading — so a
+glance across three windows tells you who is in charge of what. Out of the box
+Meter keeps the time and the transport, Thrum keeps the key, and Echo follows
+both, which means launching all three is already an ensemble with nothing to set
+up.
+
+**Together** drops every app onto a downbeat at once. Only the app leading the
+transport offers it.
+
+Thrum leads the key by default. The harmony is what a drone *is*, and Flow moving
+the key around is then something the other two hear rather than something only
+this window knows about. While Thrum is *following* a key instead, the harmony
+controls refuse rather than springing back — and that refusal covers Flow as well
+as your hands, because an instrument that is following should not quietly argue
+with what it is following.
+
+Following a tempo does more than match a number. The pulse stops integrating its
+own beat and *reads* the shared grid, so every lane's step zero lands on the
+leader's beat: the arpeggios sit on the kick drum rather than near it. Matching a
+tempo while keeping your own count is not being in time with anything — the two
+agree about how fast the beats go by and disagree, permanently, about where they
+fall.
+
+Nothing about the mechanism is timing-critical: what travels between the apps is
+a description of the grid — a tempo and one beat pinned to a mach uptime — rather
+than a stream of clock ticks, so followers work out every beat themselves against
+the same clock and nothing drifts, whatever the messages do. The details, and why
+it is not Ableton Link, are in `../ensemble/README.md`.

@@ -1,11 +1,13 @@
 import SwiftUI
+import TipJar
 
 /// Almost nothing, on purpose.
 ///
 /// The Mac app is 1,100 lines of interface because it is an instrument you play.
 /// This is the same engine playing itself, so the only controls that survive are
-/// the ones a listener could actually want: start, stop, and how loud. Everything
-/// else Flow decides.
+/// the ones a listener could actually want: stop, and how loud. Everything else
+/// Flow decides, starting with whether to start — there is no splash to tap
+/// through, so the drone is already sounding by the time the screen draws.
 ///
 /// The controls fade out with the field and come back on a tap, which means the
 /// steady state of this app is a black screen with a slow drifting picture on it
@@ -44,6 +46,12 @@ struct FlowView: View {
     /// The semi-secret reset — see the long press on ⏯ in `controls`.
     @State private var askingToReset = false
     @State private var holdFired = false
+    @State private var showingSettings = false
+    @State private var showingTipJar = false
+    /// Held here rather than inside the sheet so it outlives being dismissed:
+    /// the six prices are fetched once, and a purchase that finishes after the
+    /// sheet is gone still has something listening for it.
+    @StateObject private var jar = TipJar(prefix: "com.jeffhobbs.thrumflow.tip")
 
     init(host: FlowHost) {
         self.host = host
@@ -61,13 +69,13 @@ struct FlowView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-            // Tap anywhere: start it, or wake the controls.
+            // Tap anywhere: wake the controls.
             //
             // A sibling *underneath* the controls rather than, as before, a
             // `.contentShape(Rectangle()).onTapGesture` wrapped around the whole
             // ZStack. Same behaviour, but it stops the app relying on a race it
             // once lost: a gesture on the container competes with every control
-            // inside it, which is why the ☯ had to stop being a `Button`. As a
+            // inside it, which is why the transport glyphs are not `Button`s. As a
             // layer below, SwiftUI's front-to-back hit testing settles it —
             // whatever is on top gets first refusal, and anything landing on empty
             // screen falls through to here.
@@ -117,15 +125,11 @@ struct FlowView: View {
                 }
                 .onTapGesture {
                     // A tap on empty screen never changes the transport — it only
-                    // begins the very first session, or wakes the controls so the
-                    // transport can be reached deliberately. Tapping anywhere to
-                    // pause would make the whole screen a hair trigger for silence.
-                    if host.hasStarted {
-                        host.touched()
-                        reveal()
-                    } else {
-                        begin()
-                    }
+                    // wakes the controls so the transport can be reached
+                    // deliberately. Tapping anywhere to pause would make the whole
+                    // screen a hair trigger for silence.
+                    host.touched()
+                    reveal()
                 }
 
             // The receipt for a mark. Small, brief, and at the top where nothing
@@ -146,35 +150,48 @@ struct FlowView: View {
                 .allowsHitTesting(false)
             }
 
-            // Both overlays are always mounted and merely faded, rather than being
-            // inserted and removed by an `if` with a `.transition`.
-            //
-            // A conditional view can leave a departing copy of itself in the
-            // hierarchy for the length of its transition, and a copy at zero opacity
-            // still hit-tests — so a tap can be swallowed by controls that are no
-            // longer there. Fading a permanently-mounted view has no insertion to go
-            // wrong, and `allowsHitTesting` then says in one place what is touchable
-            // instead of leaving it to be inferred from what is on screen. It costs
-            // nothing: this is four text views and three glyphs.
-            // Carries its own tap rather than deferring to the layer beneath, and
-            // that is not redundancy: `allowsHitTesting(false)` would take it out of
-            // VoiceOver too, leaving a blind user with a full-screen unlabelled tap
-            // target and no "Start Flow" to activate. Sighted taps land on whichever
-            // of the two is nearer; both do the same thing.
-            // The ☯ is the invitation to begin, and it is shown exactly once in the
-            // life of a launch. After the first tap the transport takes over and
-            // there is nothing left for it to invite — pausing is not un-starting,
-            // so putting the ☯ back would be offering to begin something that is
-            // already under way.
-            startPrompt
-                .opacity(host.hasStarted ? 0 : 1)
-                .allowsHitTesting(!host.hasStarted)
+            // Surfaced rather than swallowed. `start()` used to catch and silently
+            // `return`, which is indistinguishable from a dead button — and on a
+            // device with no console to hand, invisible. Always mounted and merely
+            // faded, for the reason documented on `marked` above.
+            if let error = host.lastError {
+                VStack {
+                    Text(error)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.orange.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 44)
+                        .padding(.top, 24)
+                    Spacer()
+                }
+                .transition(.opacity)
+                .allowsHitTesting(false)
+            }
 
             controls
                 .opacity(controlsVisible ? 1 : 0)
                 .allowsHitTesting(controlsVisible)
         }
         .statusBarHidden()
+        // Presented from the ZStack rather than from the gear itself, for the same
+        // reason the reset alert is: the control that opens this is inside the
+        // controls overlay, which fades and stops hit-testing five seconds later.
+        // A sheet owned by a view that can go away goes away with it.
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(host: host)
+        }
+        .sheet(isPresented: $showingTipJar) {
+            TipJarView(jar: jar)
+        }
+        // Coming back from a sheet, the five-second fade has long since run and
+        // the glyph that was just tapped would be invisible — which reads as the
+        // screen having lost it rather than as it having faded.
+        .onChange(of: showingSettings) { _, showing in
+            if !showing { host.touched(); reveal() }
+        }
+        .onChange(of: showingTipJar) { _, showing in
+            if !showing { host.touched(); reveal() }
+        }
         .animation(.easeInOut(duration: 0.45), value: showControls)
         .animation(.easeInOut(duration: 0.3), value: note)
         .animation(.easeInOut(duration: 0.8), value: host.transport)
@@ -189,52 +206,18 @@ struct FlowView: View {
             UIApplication.shared.isIdleTimerDisabled = host.running && !idle
         }
         .onAppear {
-            // Start without a tap, for driving the app from a script.
-            //
-            // Use it sparingly and never to sign off the UI: it skips the one path
-            // a person actually takes, which is how the app once shipped unable to
-            // start at all while every simulator run reported success. `simctl` has
-            // no touch synthesis, but `Tools/click` posts real CGEvents at the
-            // simulator window, and that does exercise the affordance — see the note
-            // above about the five-second fade before trusting what it tells you.
-            if ProcessInfo.processInfo.arguments.contains("-autostart") {
-                host.start()
+            // Drop straight into the UI and hit play — there is no splash to tap
+            // through any more, so the drone starts the moment the screen draws.
+            if !host.hasStarted { begin() }
+            // Same bargain the settings sheet always had: it is behind a glyph
+            // that fades after five seconds, in a corner, and a click that misses
+            // it by a few points is indistinguishable from a sheet that failed to
+            // open. This skips the affordance, so a script can say the *screen*
+            // is right and never that the gear works.
+            if ProcessInfo.processInfo.arguments.contains("-settings") {
+                showingSettings = true
             }
         }
-    }
-
-    /// The affordance, and the only thing on screen before the drone starts.
-    ///
-    /// A tap gesture rather than a `Button` — this is the control that was a
-    /// `Button` when the app shipped sitting on the ☯ forever, and the same
-    /// primitive the three controls below use.
-    private var startPrompt: some View {
-        VStack(spacing: 26) {
-            YinYang()
-                .frame(width: 104, height: 104)
-
-            if let error = host.lastError {
-                // Surfaced rather than swallowed. `start()` used to catch and
-                // silently `return`, which is indistinguishable from a dead
-                // button — and on a device with no console to hand, invisible.
-                Text(error)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(.orange.opacity(0.9))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 44)
-            } else {
-                Text("tap to begin")
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .tracking(1.8)
-                    .foregroundStyle(.white.opacity(0.28))
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: begin)
-        .accessibilityElement()
-        .accessibilityLabel("Start Flow")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction(.default, begin)
     }
 
     private func begin() {
@@ -244,6 +227,16 @@ struct FlowView: View {
 
     private var controls: some View {
         VStack {
+            // Wordmark to the left, the three things that are about the app
+            // rather than about the drone — tip jar, sleep, settings — to the
+            // right, in that order: quietest first, the one most people never
+            // touch last. The same arrangement Plasma and Meter use. It fades
+            // with the rest of the controls, which is what keeps the steady
+            // state of this app a black screen with a picture on it.
+            header
+                .padding(.top, 4)
+                .padding(.horizontal, 4)
+
             Spacer()
 
             VStack(spacing: 18) {
@@ -438,12 +431,111 @@ struct FlowView: View {
         host.hasStarted && (showControls || host.transport == .paused)
     }
 
+    /// Wordmark to the left, tip jar, sleep timer and settings to the right —
+    /// the same header Plasma and Meter both use.
+    private var header: some View {
+        HStack(spacing: 0) {
+            Text("THRUM")
+                .font(.system(size: 13, weight: .heavy, design: .rounded))
+                .tracking(3.2)
+                .foregroundStyle(.white.opacity(0.35))
+                .allowsHitTesting(false)
+            Spacer()
+            tipJarButton
+            sleepButton
+            gear
+        }
+    }
+
+    /// A tap gesture on an explicitly shaped view, like every other control
+    /// here — see the reasoning on `control` below.
+    private var tipJarButton: some View {
+        Image(systemName: jar.given > 0 ? "cup.and.saucer.fill" : "cup.and.saucer")
+            .font(.system(size: 15, weight: .light))
+            .foregroundStyle(.white.opacity(jar.given > 0 ? 0.5 : 0.35))
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: openTipJar)
+            .accessibilityElement()
+            .accessibilityLabel("Tip jar")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(.default, openTipJar)
+    }
+
+    private func openTipJar() {
+        host.touched()
+        hideWork?.cancel()
+        showControls = true
+        showingTipJar = true
+    }
+
+    /// Cycles rather than opens a picker: four states is not worth a sheet,
+    /// and a thing you set on the way to sleep should take one tap.
+    private var sleepButton: some View {
+        HStack(spacing: 3) {
+            Image(systemName: host.sleepMinutes == 0 ? "moon" : "moon.zzz")
+                .font(.system(size: 13, weight: .light))
+            if let remaining = host.sleepRemaining {
+                Text("\(Int(remaining / 60) + 1)m")
+                    .font(.system(size: 11, design: .monospaced))
+            } else if host.sleepMinutes > 0 {
+                Text("\(host.sleepMinutes)m")
+                    .font(.system(size: 11, design: .monospaced))
+            }
+        }
+        .foregroundStyle(host.sleepMinutes == 0
+                          ? .white.opacity(0.35)
+                          : Color(hue: 0.56, saturation: 0.5, brightness: 0.9))
+        .frame(height: 44)
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: cycleSleepTimer)
+        .accessibilityElement()
+        .accessibilityLabel(host.sleepMinutes == 0 ? "Sleep timer, off" : "Sleep timer, \(host.sleepMinutes) minutes")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, cycleSleepTimer)
+    }
+
+    private func cycleSleepTimer() {
+        let steps = [0, 20, 45, 90]
+        let next = (steps.firstIndex(of: host.sleepMinutes).map { $0 + 1 } ?? 1) % steps.count
+        host.sleepMinutes = steps[next]
+        host.touched()
+        reveal()
+    }
+
+    /// The way to the two preferences this app has.
+    ///
+    /// A tap gesture on an explicitly shaped view, like every other control here
+    /// and for the reason documented on `control` below. 44 points square because
+    /// a 15-point glyph is not a target.
+    private var gear: some View {
+        Image(systemName: "gearshape")
+            .font(.system(size: 15, weight: .light))
+            .foregroundStyle(.white.opacity(0.38))
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: openSettings)
+            .accessibilityElement()
+            .accessibilityLabel("Settings")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(.default, openSettings)
+    }
+
+    private func openSettings() {
+        host.touched()
+        // Hold the fade off while the sheet is on its way up, so the gear is not
+        // fading out underneath it.
+        hideWork?.cancel()
+        showControls = true
+        showingSettings = true
+    }
+
     /// One of the three controls: a glyph, a generous tap target, and a tap
     /// gesture rather than a `Button`.
     ///
-    /// `.onTapGesture` on an explicitly shaped view is the same primitive the ☯
-    /// was moved to, and for the same reason — it is the one thing in this view
-    /// that has never been ambiguous about who receives a touch. A `Button` brings
+    /// `.onTapGesture` on an explicitly shaped view is the one thing in this
+    /// view that has never been ambiguous about who receives a touch. A `Button` brings
     /// `_ButtonGesture`'s press-state machinery, which is exactly what lost to the
     /// container gesture before, and it buys nothing here: there is no pressed
     /// style to speak of on a thin white glyph over black.
@@ -503,53 +595,5 @@ struct FlowView: View {
         let work = DispatchWorkItem { showControls = false }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
-    }
-}
-
-/// The ☯, drawn rather than typed.
-///
-/// `Text("☯")` is the obvious version and it is wrong on iOS: U+262F has emoji
-/// presentation by default, so it arrives as a purple color glyph that ignores
-/// both `.thin` and `foregroundStyle`. Drawing it also means it can be line art
-/// to match the rest of the app, and can turn — a quarter revolution per minute,
-/// slow enough that you notice it has moved rather than watching it move.
-struct YinYang: View {
-    @State private var spin = false
-
-    var body: some View {
-        GeometryReader { geo in
-            let d = min(geo.size.width, geo.size.height)
-            let r = d / 2
-            let ink = Color.white.opacity(0.82)
-
-            ZStack {
-                Circle()
-                    .strokeBorder(ink, lineWidth: d * 0.012)
-
-                // The S-curve: two half-circles of radius r/2, meeting at the
-                // centre, which is the whole construction of the figure.
-                Path { p in
-                    p.addArc(center: CGPoint(x: r, y: r * 0.5), radius: r * 0.5,
-                             startAngle: .degrees(-90), endAngle: .degrees(90), clockwise: false)
-                    p.addArc(center: CGPoint(x: r, y: r * 1.5), radius: r * 0.5,
-                             startAngle: .degrees(-90), endAngle: .degrees(90), clockwise: true)
-                }
-                .stroke(ink, lineWidth: d * 0.012)
-
-                Circle()
-                    .fill(ink)
-                    .frame(width: d * 0.10, height: d * 0.10)
-                    .offset(y: -r * 0.5)
-
-                Circle()
-                    .strokeBorder(ink, lineWidth: d * 0.012)
-                    .frame(width: d * 0.10, height: d * 0.10)
-                    .offset(y: r * 0.5)
-            }
-            .frame(width: d, height: d)
-            .rotationEffect(.degrees(spin ? 360 : 0))
-            .animation(.linear(duration: 240).repeatForever(autoreverses: false), value: spin)
-        }
-        .onAppear { spin = true }
     }
 }

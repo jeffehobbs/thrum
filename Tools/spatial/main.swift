@@ -352,192 +352,284 @@ do {
 
 print("\n— the head-tracking transport —")
 
-// 6. `HeadSmoother` is the whole of what stands between a CoreMotion sample and
-// sixteen HRTFs being re-pointed, and until it was pulled out of `HeadTracker` none
-// of it could be tested at all: it was reachable only through a `CMAttitude`, which
-// has no public initialiser. These drive it with a synthetic head instead.
+// 6. `HeadTransport` is the whole of what stands between a CoreMotion sample and
+// sixteen HRTFs being re-pointed, and it has two clocks: the sensor's, which
+// deposits targets, and the render cycle's, which advances the field and hands the
+// node one orientation per cycle. These drive both with a synthetic head.
 //
 // The reason to care is a listener report — "warble when I tilt my head up and
 // down, worst on the higher voices" — that survived three offline measurements of
-// the render path. `Tools/warble` established that AVAudioEnvironmentNode is not at
-// fault: it crossfades its filter hand-overs (boundary roughness 1.00× interior at
-// every frequency tried) and snaps no harder in elevation than azimuth. So the
-// suspect is what we hand it, and a discontinuity in an Euler angle is the one thing
-// on this path that is intermittent, axis-specific, and loudest in the high band —
-// because a large step re-points every source at once and elevation is encoded in
-// pinna notches at 5–10 kHz.
+// the render path (`Tools/warble`), was traced once to an Euler singularity
+// (6a below) and once to a stall the slew limit could not reach, and left a
+// structural problem behind: the field used to move on the sensor's schedule and be
+// read on the audio's, with a 45 ms rate cap between them, so what the ear got was
+// the head's path sampled by the beat between three unrelated timers (6c). Nothing
+// here forms an Euler angle except the readout.
 do {
-    /// Feed a trajectory in and report what came out.
-    func run(_ samples: [(Double, Double, Double)], dt: Double = 0.04)
-    -> (out: [AVAudio3DVectorOrientation], clamped: Int, peak: Double) {
-        var s = HeadSmoother()
-        var out: [AVAudio3DVectorOrientation] = []
-        var clamped = 0, peak = 0.0
-        for (y, p, r) in samples {
-            let step = s.step(yaw: y, pitch: p, roll: r, dt: dt)
-            out.append(step.head.orientation)
-            if step.clamped { clamped += 1 }
-            peak = max(peak, step.rate)
+    /// A tick rate of 1024 frames at 48 kHz — what ThrumFlow asks for while tracking.
+    let tickHz = 48000.0 / 1024
+
+    /// The transport driven by two clocks.
+    struct Rig {
+        var transport = HeadTransport()
+        var t = 0.0
+        var nextSample = 0.0, nextTick = 0.0
+        let sensorDt: Double, tickDt: Double
+        /// Every orientation handed to the node, in order.
+        var written: [HeadOrientation] = []
+        /// Where the field stood at each tick, whether or not it was written.
+        var held: [HeadOrientation] = []
+
+        init(sensorHz: Double = 50, tickHz: Double) {
+            sensorDt = 1 / sensorHz; tickDt = 1 / tickHz
         }
-        return (out, clamped, peak)
+
+        /// What a real sensor reports: gravity in the device frame, for an attitude
+        /// whose world is z-up.
+        static func gravity(for attitude: simd_quatd) -> simd_double3 {
+            attitude.inverse.act(simd_double3(0, 0, -1))
+        }
+
+        /// Run for `seconds` with the head at `head(t)`; `sensing: false` is a stall.
+        mutating func run(_ seconds: Double, sensing: Bool = true, head: (Double) -> simd_quatd) {
+            let until = t + seconds
+            while t < until {
+                if sensing, nextSample <= nextTick {
+                    t = nextSample
+                    let att = head(t)
+                    transport.ingest(attitude: att, gravity: Self.gravity(for: att), at: t)
+                    nextSample += sensorDt
+                } else {
+                    t = nextTick
+                    if !sensing { nextSample = max(nextSample, t + sensorDt) }
+                    if let out = transport.advance(to: t) { written.append(out) }
+                    held.append(transport.orientation)
+                    nextTick += tickDt
+                }
+            }
+        }
+
+        mutating func run(_ seconds: Double, sensing: Bool = true,
+                          yaw: Double, pitch: Double = 0, roll: Double = 0) {
+            run(seconds, sensing: sensing) { _ in HeadMath.rotation(yaw: yaw, pitch: pitch, roll: roll) }
+        }
     }
 
-    /// How far the field actually turned between two frames, in degrees.
-    ///
-    /// Measured on the vectors the node is driven with rather than on Euler angles,
-    /// and that is the point: the whole bug was an Euler angle moving 168° while the
-    /// rotation it described moved a fraction of a degree. A test that measured the
-    /// angles would have reported the artifact as a real movement — and, run against
-    /// the fix, would report the fix as broken.
-    func fieldStep(_ a: AVAudio3DVectorOrientation, _ b: AVAudio3DVectorOrientation) -> Double {
-        func ang(_ u: AVAudio3DVector, _ v: AVAudio3DVector) -> Double {
-            let d = Double(u.x * v.x + u.y * v.y + u.z * v.z)
-            return acos(max(-1, min(1, d))) * 180 / .pi
-        }
-        return max(ang(a.forward, b.forward), ang(a.up, b.up))
-    }
-    /// The largest single-frame movement in the output, which is what the HRTF sees.
-    func biggestStep(_ v: [AVAudio3DVectorOrientation]) -> Double {
+    /// How far the field turned between two orientations, in degrees, measured on
+    /// the vectors the node is driven with rather than on Euler angles — the whole
+    /// 6a bug was an Euler angle moving 168° while the rotation moved a fraction of
+    /// a degree, and a test that measured angles would have called the fix broken.
+    func fieldStep(_ a: HeadOrientation, _ b: HeadOrientation) -> Double { b.separation(from: a) }
+    func biggestStep(_ v: [HeadOrientation]) -> Double {
         var worst = 0.0
-        for i in 1..<v.count { worst = max(worst, fieldStep(v[i - 1], v[i])) }
+        for i in 1..<max(1, v.count) { worst = max(worst, fieldStep(v[i - 1], v[i])) }
         return worst
     }
 
     // An ordinary nod: ±20° at 0.4 Hz, which is looking down at the phone and back.
     // Nothing here should ever engage the limit — if it did, the limit would be a
     // tone control rather than a guard.
-    let nod = (0..<200).map { i -> (Double, Double, Double) in
-        (0, 20 * sin(2 * .pi * 0.4 * Double(i) * 0.04), 0)
-    }
-    let nodded = run(nod)
-    check(nodded.clamped == 0, "an ordinary nod is never rate-limited",
-          "peak input \(Int(nodded.peak))°/s")
+    var nod = Rig(tickHz: tickHz)
+    nod.run(8) { t in HeadMath.rotation(yaw: 0, pitch: 20 * sin(2 * .pi * 0.4 * t), roll: 0) }
+    let nodded = nod.transport.drainDiagnostics()
+    check(nodded.clampedTicks == 0, "an ordinary nod is never rate-limited",
+          "peak input \(Int(nodded.peakRate))°/s")
     // The rate the recorder reports has to be the head's, not the smoother's lag —
     // it is the one number that says whether a stream is physically possible, and it
     // is useless if ordinary movement already reads as impossible. A ±20° nod at
     // 0.4 Hz peaks at 2π·0.4·20 ≈ 50°/s.
-    check(nodded.peak > 40 && nodded.peak < 60,
+    check(nodded.peakRate > 40 && nodded.peakRate < 60,
           "and the rate it reports is the head's own, not the tracking error",
-          String(format: "%.0f°/s for a nod that peaks at 50", nodded.peak))
-    check(biggestStep(nodded.out) < 2, "and moves the field in small steps",
-          String(format: "largest %.2f° per frame", biggestStep(nodded.out)))
+          String(format: "%.0f°/s for a nod that peaks at 50", nodded.peakRate))
+    check(biggestStep(nod.written) < 2, "and moves the field in small steps",
+          String(format: "largest %.2f° per cycle", biggestStep(nod.written)))
+    check(nodded.writes <= nod.held.count && nodded.writes > nod.held.count / 2,
+          "the node is written once per render cycle at most, whatever the sensor does",
+          "\(nodded.samples) samples in, \(nodded.writes) writes out of \(nod.held.count) cycles over 8 s")
 
     // A fast deliberate turn — 300°/s, faster than anyone looks around — still must
     // not be limited, or the field lags the head exactly when it is most obvious.
-    let fast = (0..<40).map { i -> (Double, Double, Double) in (300 * Double(i) * 0.04, 0, 0) }
-    check(run(fast).clamped == 0, "so is a 300°/s turn of the head")
+    var fast = Rig(tickHz: tickHz)
+    fast.run(1.6) { t in HeadMath.rotation(yaw: 300 * t, pitch: 0, roll: 0) }
+    check(fast.transport.drainDiagnostics().clampedTicks == 0, "so is a 300°/s turn of the head")
 
-    // A stall in the motion stream, which the 08-15 flight log has 32 of, the worst
-    // 2.0 s long — and `clamped 0` on every heartbeat while they happened.
+    // 6b. A stall in the motion stream, which the 08-15 flight log has 32 of, the
+    // worst 2.0 s long — and `clamped 0` on every heartbeat while they happened.
     //
     // The head keeps moving while the stream is quiet, so the first sample back
-    // carries the whole movement at once. Both terms in `step` used to scale with
-    // the interval, which relaxed them precisely when they were needed: at a 1.3 s
-    // gap the one-pole's fraction reaches 1.000 and the limiter's allowance reaches
-    // 520°, so a 40° movement was applied to sixteen HRTFs in one frame and the
-    // guard correctly reported nothing, because 40 is less than 520.
+    // carries the whole movement at once. The old smoother was stepped per sample and
+    // both its terms scaled with the interval, which relaxed them precisely when they
+    // were needed: at a 1.3 s gap the one-pole's fraction reached 1.000 and the
+    // limiter's allowance 520°, so 40° landed on sixteen HRTFs in one frame and the
+    // guard correctly reported nothing. Now the smoother is stepped by the render
+    // clock, so a stall is just a target that stopped changing and then jumped — the
+    // same thing as a fast head, and handled the same way.
     //
-    // The control below is the whole point. It reproduces what the old code did by
-    // asking for the same interval as a *sequence of ordinary samples with a jump
-    // in it* — the same information, arriving in a way the smoother was already
-    // known to handle — so the two runs differ only in the gap. Per the house rule,
-    // the assertion is first that the harness sees the artifact: if `stalled` and
-    // `continuous` came out alike, this would be measuring nothing.
-    func afterGap(_ gap: Double, moved: Double) -> Double {
-        var s = HeadSmoother()
-        var out: [AVAudio3DVectorOrientation] = []
-        for _ in 0..<50 { out.append(s.step(yaw: 0, pitch: 0, roll: 0, dt: 0.02).head.orientation) }
-        // One sample arrives late, carrying everything the head did in the meantime.
-        out.append(s.step(yaw: moved, pitch: 0, roll: 0, dt: gap).head.orientation)
-        for _ in 0..<50 { out.append(s.step(yaw: moved, pitch: 0, roll: 0, dt: 0.02).head.orientation) }
-        return biggestStep(out)
+    // The control is the point: the same 40° arriving as an ordinary sample-to-sample
+    // step, so the two runs differ only in the gap.
+    func afterGap(stalled: Bool) -> (step: Double, arrived: Double, stalls: Int) {
+        var rig = Rig(tickHz: tickHz)
+        rig.run(1, yaw: 0)
+        _ = rig.transport.drainDiagnostics()
+        let before = rig.written.count
+        if stalled { rig.run(2, sensing: false, yaw: 0) }
+        rig.run(0.8, yaw: 40)
+        let after = Array(rig.written[max(0, before - 1)...])
+        return (biggestStep(after), rig.transport.orientation.yaw, rig.transport.drainDiagnostics().stalls)
     }
-    let stalled = afterGap(2.0, moved: 40)
-    let brief = afterGap(0.02, moved: 40)
-    check(stalled <= brief * 1.2,
-          "a 2 s stall in the stream moves the field no harder than an ordinary sample",
-          String(format: "%.2f° per frame after the gap, vs %.2f° with no gap", stalled, brief))
-    // 400°/s × 50 ms is 20°, so anything at or under that is inside the guard; the
-    // old behaviour put the entire 40° through in one frame.
-    check(stalled < 20,
-          "and the slew limit can actually reach it now",
-          String(format: "%.2f° in one frame, against 40° of head movement", stalled))
+    let stalled = afterGap(stalled: true), brief = afterGap(stalled: false)
+    check(stalled.stalls == 1 && brief.stalls == 0, "a 2 s stall is counted as one",
+          "\(stalled.stalls) with the gap, \(brief.stalls) without")
+    check(stalled.step <= brief.step * 1.05 + 0.01,
+          "and moves the field no harder than the same movement arriving on time",
+          String(format: "%.2f° per cycle after the gap, vs %.2f° with no gap", stalled.step, brief.step))
+    check(stalled.step <= HeadSmoother.maxDegreesPerSecond / tickHz + 0.001,
+          "inside the slew limit, which can now reach it",
+          String(format: "%.2f° in one cycle, against 40° of head movement", stalled.step))
     // The field must still get there — easing must not become ignoring.
-    var caught = HeadSmoother()
-    for _ in 0..<20 { _ = caught.step(yaw: 0, pitch: 0, roll: 0, dt: 0.02) }
-    _ = caught.step(yaw: 40, pitch: 0, roll: 0, dt: 2.0)
-    for _ in 0..<40 { _ = caught.step(yaw: 40, pitch: 0, roll: 0, dt: 0.02) }
-    check(abs(caught.yaw - 40) < 2,
+    check(abs(stalled.arrived - 40) < 2,
           "and the field arrives where the head went, within a second of the stream returning",
-          String(format: "%.1f° of 40 after 0.8 s", caught.yaw))
+          String(format: "%.1f° of 40 after 0.8 s", stalled.arrived))
 
-    // The bug this fixes. Roll used to get neither the wrap nor the shortest way
-    // round, so a head tilted far enough to take CoreMotion's roll from +179° to
-    // −179° handed the one-pole a 358° error and it set off the long way, sweeping
-    // the whole field through every azimuth on its way to a destination 2° away.
-    var held = HeadSmoother()
-    for _ in 0..<80 { _ = held.step(yaw: 0, pitch: 0, roll: 179, dt: 0.04) }
-    check(abs(held.roll - 179) < 1, "roll settles where it was told to",
-          String(format: "%.1f°", held.roll))
+    // The bug the quaternion fixed first. Roll used to get neither the wrap nor the
+    // shortest way round, so a head tilted far enough to take CoreMotion's roll from
+    // +179° to −179° handed the one-pole a 358° error and it set off the long way,
+    // sweeping the whole field through every azimuth to a destination 2° away.
+    var held = Rig(tickHz: tickHz)
+    held.run(3, yaw: 0, roll: 179)
+    check(abs(held.transport.orientation.roll - 179) < 1, "roll settles where it was told to",
+          String(format: "%.1f°", held.transport.orientation.roll))
+    let before = held.written.count
+    held.run(1.6, yaw: 0, roll: -179)
     var travelled = 0.0
-    var previous = held.orientation
-    for _ in 0..<40 {
-        let s = held.step(yaw: 0, pitch: 0, roll: -179, dt: 0.04)
-        travelled += fieldStep(previous, s.head.orientation)
-        previous = s.head.orientation
-    }
+    for i in before..<held.written.count { travelled += fieldStep(held.written[i - 1], held.written[i]) }
     check(travelled < 10, "and crossing ±180° takes the short way, not 358° of field",
           String(format: "travelled %.1f°", travelled))
 
     // Any discontinuity at all — a re-seated reference, a resumed Bluetooth batch —
-    // is spread over several frames instead of arriving as one event.
-    var jumped = HeadSmoother()
-    for _ in 0..<60 { _ = jumped.step(yaw: 0, pitch: 0, roll: 0, dt: 0.04) }
-    var worst = 0.0, previousFacing = jumped.orientation
-    for _ in 0..<40 {
-        let s = jumped.step(yaw: 0, pitch: 90, roll: 0, dt: 0.04)
-        worst = max(worst, fieldStep(previousFacing, s.head.orientation))
-        previousFacing = s.head.orientation
-    }
-    check(worst <= HeadSmoother.maxDegreesPerSecond * 0.04 + 0.001,
+    // is spread over several cycles instead of arriving as one event.
+    var jumped = Rig(tickHz: tickHz)
+    jumped.run(2, yaw: 0)
+    let mark = jumped.written.count
+    jumped.run(1.6, yaw: 0, pitch: 90)
+    let glide = biggestStep(Array(jumped.written[(mark - 1)...]))
+    check(glide <= HeadSmoother.maxDegreesPerSecond / tickHz + 0.001,
           "a 90° step is delivered as a glide, not a lurch",
-          String(format: "largest %.1f° per frame, was %.1f before the limit",
-                 worst, 90 * HeadSmoother.coefficient(for: 0.04)))
-    check(abs(jumped.pitch - 90) < 5, "and still arrives",
-          String(format: "%.1f°", jumped.pitch))
+          String(format: "largest %.1f° per cycle, was %.1f before the limit",
+                 glide, 90 * HeadSmoother.coefficient(for: 1 / tickHz)))
+    check(abs(jumped.transport.orientation.pitch - 90) < 5, "and still arrives",
+          String(format: "%.1f°", jumped.transport.orientation.pitch))
 
-    // The smoothing has to be a *time*, not a per-sample coefficient.
-    //
-    // This is the check that would have caught the real bug. The old smoother
-    // multiplied the error by a bare 0.28 every sample, which is only the intended
-    // ~120 ms if the sensor delivers 25 Hz — and ThrumFlow's flight recorder says
-    // AirPods Pro 2 deliver 50 Hz (`motion 1500/30s`, every session). So on the
-    // device the field settled in half the time it was tuned for, i.e. head movement
-    // reached sixteen HRTFs twice as twitchy as designed.
-    //
-    // Same head, same wall-clock, two sensor rates: the field must arrive in the same
-    // place at the same time. Half a second into a 30° turn a 120 ms one-pole is
-    // ~98% there, and the two rates must agree to well inside what an ear could tell.
-    func settle(after seconds: Double, dt: Double) -> Double {
-        var s = HeadSmoother()
-        for _ in 0..<Int(seconds / dt) { _ = s.step(yaw: 30, pitch: 0, roll: 0, dt: dt) }
-        return s.yaw
+    // The smoothing has to be a *time*, not a per-sample coefficient — and now that
+    // the render clock steps it, the sensor's rate cannot enter at all. Same head,
+    // same wall-clock, two sensor rates: the field must be in the same place.
+    func settle(sensorHz: Double) -> Double {
+        var rig = Rig(sensorHz: sensorHz, tickHz: tickHz)
+        rig.run(0.5, yaw: 30)
+        return rig.transport.orientation.yaw
     }
-    let at25 = settle(after: 0.5, dt: 0.04)
-    let at50 = settle(after: 0.5, dt: 0.02)
+    let at25 = settle(sensorHz: 25), at50 = settle(sensorHz: 50)
     check(abs(at25 - at50) < 0.5,
           "smoothing is a time constant, so the sensor's rate can't change the feel",
           String(format: "%.2f° at 25 Hz vs %.2f° at 50 Hz", at25, at50))
-    // And it is still the time constant the original coefficient encoded, so this is
-    // a fix to the 50 Hz case rather than a retuning of the 25 Hz one.
     check(abs(HeadSmoother.coefficient(for: 0.04) - 0.28) < 0.005,
           "and 25 Hz still gets exactly the coefficient it was tuned with",
           String(format: "%.3f", HeadSmoother.coefficient(for: 0.04)))
 
+    // 6c. Two clocks, one field. The reason for the rewrite, measured.
+    //
+    // The old chain: smooth on every sensor sample, write to the node at most every
+    // 45 ms, and let the render cycle pick up whatever was written last. At 50 Hz
+    // samples, a 45 ms cap and 21 ms cycles, a head turning steadily at 100°/s
+    // reaches the node as a stutter — cycles in which the field does not move at all
+    // alternating with cycles in which it jumps three cycles' worth. Per the house
+    // rule, that is reconstructed first so the assertion below means something.
+    let turn: (Double) -> simd_quatd = { t in HeadMath.rotation(yaw: 100 * t, pitch: 0, roll: 0) }
+    var oldSmoother = HeadSmoother()
+    var oldWritten = HeadMath.identity
+    var oldHeld: [HeadOrientation] = []
+    do {
+        var t = 0.0, nextSample = 0.0, nextTick = 0.0, lastWrite = -1.0
+        while t < 4 {
+            if nextSample <= nextTick {
+                t = nextSample
+                _ = oldSmoother.step(toward: turn(t), dt: 0.02)
+                if lastWrite < 0 || t - lastWrite >= 0.045 { oldWritten = oldSmoother.current; lastWrite = t }
+                nextSample += 0.02
+            } else {
+                t = nextTick
+                oldHeld.append(HeadMath.orientation(oldWritten))
+                nextTick += 1 / tickHz
+            }
+        }
+    }
+    var newRig = Rig(tickHz: tickHz)
+    newRig.run(4, head: turn)
+    /// After the first second, so the one-pole has settled onto the ramp.
+    func steps(_ held: [HeadOrientation]) -> [Double] {
+        let settled = Array(held.dropFirst(Int(tickHz)))
+        return (1..<settled.count).map { fieldStep(settled[$0 - 1], settled[$0]) }
+    }
+    let oldSteps = steps(oldHeld), newSteps = steps(newRig.held)
+    let oldFrozen = Double(oldSteps.filter { $0 < 0.01 }.count) / Double(oldSteps.count)
+    let newFrozen = Double(newSteps.filter { $0 < 0.01 }.count) / Double(newSteps.count)
+    let ideal = 100 / tickHz
+    check(oldFrozen > 0.3 && (oldSteps.max() ?? 0) > ideal * 2,
+          "the old chain really did stutter (so the checks below mean something)",
+          String(format: "field frozen on %.0f%% of cycles, then jumping %.1f° where a cycle's worth is %.1f°",
+                 oldFrozen * 100, oldSteps.max() ?? 0, ideal))
+    check(newFrozen == 0 && (newSteps.max() ?? 0) < ideal * 1.3,
+          "the field now moves every cycle, by about a cycle's worth",
+          String(format: "frozen on %.0f%% of cycles, largest step %.2f° against %.2f° ideal, smallest %.2f°",
+                 newFrozen * 100, newSteps.max() ?? 0, ideal, newSteps.min() ?? 0))
+
+    // A still head. AirPods at rest jitter by a few tenths of a degree at 50 Hz, and
+    // every one of those used to be a candidate write. The one-pole takes most of it
+    // out and the dead band the rest — `Tools/handover` measured what remains as
+    // inaudible against a listener who never moves — so a still head should cost
+    // the graph a fraction of the writes a moving one does.
+    var seed = 99.0
+    func noise() -> Double {
+        seed = (seed * 1103515245 + 12345).truncatingRemainder(dividingBy: 2147483648)
+        let u1 = max(seed / 2147483648, 1e-9)
+        seed = (seed * 1103515245 + 12345).truncatingRemainder(dividingBy: 2147483648)
+        return sqrt(-2 * log(u1)) * cos(2 * .pi * seed / 2147483648)
+    }
+    var still = Rig(tickHz: tickHz)
+    still.run(1, yaw: 12, pitch: -8)
+    _ = still.transport.drainDiagnostics()
+    still.run(8) { _ in HeadMath.rotation(yaw: 12 + 0.3 * noise(), pitch: -8 + 0.3 * noise(), roll: 0) }
+    let jitter = still.transport.drainDiagnostics()
+    let ticks = Int(8 * tickHz)
+    check(jitter.writes < ticks / 2,
+          "a still head with 0.3° of sensor jitter writes on well under half its cycles",
+          "\(jitter.writes) writes in \(ticks) cycles, from \(jitter.samples) samples")
+
+    // Recenter is the one deliberate snap in the transport: the field goes to dead
+    // ahead on the very next cycle and glides from there to the head's true tilt,
+    // with the heading re-seated so "ahead" is now wherever the head points.
+    var centred = Rig(tickHz: tickHz)
+    centred.run(2, yaw: 60)                         // seeds the heading at 60°
+    centred.run(2, yaw: 90, pitch: 20)              // a held 30° turn, looking up
+    check(abs(centred.transport.orientation.yaw - 30) < 2,
+          "before recenter the field has followed a held 30° turn",
+          String(format: "%.1f°", centred.transport.orientation.yaw))
+    centred.transport.recenter()
+    let count = centred.written.count
+    centred.run(0.05, yaw: 90, pitch: 20)
+    let first = centred.written[count]
+    check(first.separation(from: .identity) < 0.001, "recenter snaps to dead ahead on the next cycle",
+          String(format: "%.4f° from identity", first.separation(from: .identity)))
+    centred.run(2, yaw: 90, pitch: 20)
+    check(abs(centred.transport.orientation.yaw) < 1 && abs(centred.transport.orientation.pitch - 20) < 1,
+          "and settles with the head's heading as forward and its true tilt kept",
+          String(format: "yaw %.1f°, pitch %.1f° of the head's 20°",
+                 centred.transport.orientation.yaw, centred.transport.orientation.pitch))
+
     // 6a. The hike bug: relative pitch crossing vertical.
     //
     // A smooth physical rotation carrying the head through pitch = 90° — which is
-    // what an ordinary nod does once the reference was captured while looking down at
+    // what an ordinary nod did once the reference was captured while looking down at
     // the phone. The rotation never moves faster than a slow turn, but CMAttitude's
     // Z-X-Y decomposition of it has pitch as the middle axis, so yaw and roll flip by
     // ~180° on the way through.
@@ -554,52 +646,53 @@ do {
     }
     // Physically this is a 60° tilt over ~5 s: nothing, about 12°/s.
     var trueTravel = 0.0
-    for i in 1..<crossing.count { trueTravel += HeadSmoother.angle(crossing[i - 1], crossing[i]) }
-    let eulers = crossing.map { HeadSmoother.euler($0) }
+    for i in 1..<crossing.count { trueTravel += HeadMath.angle(crossing[i - 1], crossing[i]) }
+    let eulers = crossing.map { HeadMath.euler($0) }
     var rawJump = 0.0
     for i in 1..<eulers.count {
-        rawJump = max(rawJump, abs(HeadSmoother.wrap(eulers[i].yaw - eulers[i - 1].yaw)))
-        rawJump = max(rawJump, abs(HeadSmoother.wrap(eulers[i].roll - eulers[i - 1].roll)))
+        rawJump = max(rawJump, abs(HeadMath.wrap(eulers[i].yaw - eulers[i - 1].yaw)))
+        rawJump = max(rawJump, abs(HeadMath.wrap(eulers[i].roll - eulers[i - 1].roll)))
     }
     check(trueTravel < 70 && rawJump > 100,
           "the trajectory really does contain the bug (so the checks below mean something)",
           String(format: "head turns %.0f° in total, its Euler angles jump %.0f° in one sample",
                  trueTravel, rawJump))
 
-    // Now the fix. Both entry points have to survive it: the quaternion one the app
-    // uses, and the Euler convenience one — because recomposing CMAttitude's angles in
-    // its own Z-X-Y order *cancels* the degenerate split rather than inheriting it,
-    // and that is the load-bearing claim of this rewrite.
-    for (name, feed) in [("quaternion", true), ("Euler round-trip", false)] {
-        var s = HeadSmoother()
-        var out: [AVAudio3DVectorOrientation] = []
-        var clamped = 0, peakRate = 0.0
+    // Now the fix. Both routes have to survive it: the quaternion the app uses, and
+    // CMAttitude's own angles recomposed in its Z-X-Y order — because recomposing
+    // *cancels* the degenerate split rather than inheriting it, and that is the
+    // load-bearing claim of carrying a rotation.
+    //
+    // Fed *absolutely* — the whole point of the 08-21 reference is that a head which
+    // really does cross vertical is the only way pitch reaches 90° now — through a
+    // sensor at 25 Hz, which is what the trajectory was sampled at.
+    for (name, viaEuler) in [("quaternion", false), ("Euler round-trip", true)] {
+        var rig = Rig(sensorHz: 25, tickHz: tickHz)
         // Settle on the starting attitude first. Without this the measurement is
         // dominated by the smoother gliding in from identity to a head already tilted
         // 60°, which is a legitimate rate-limited arrival and not what is under test.
-        for _ in 0..<80 { _ = s.step(rotation: crossing[0], dt: 0.04) }
-        for (i, q) in crossing.enumerated() {
-            let step: HeadStep
-            if feed {
-                step = s.step(rotation: q, dt: 0.04)
-            } else {
+        rig.run(3) { _ in crossing[0] }
+        _ = rig.transport.drainDiagnostics()
+        let mark = rig.written.count
+        rig.run(Double(crossing.count) * 0.04) { t in
+            let i = min(crossing.count - 1, Int((t - 3) / 0.04 + 1e-9))
+            if viaEuler {
                 let e = eulers[i]
-                step = s.step(yaw: e.yaw, pitch: e.pitch, roll: e.roll, dt: 0.04)
+                return HeadMath.rotation(yaw: e.yaw, pitch: e.pitch, roll: e.roll)
             }
-            out.append(step.head.orientation)
-            if step.clamped { clamped += 1 }
-            peakRate = max(peakRate, step.rate)
+            return crossing[i]
         }
-        check(clamped == 0 && peakRate < 200,
+        let d = rig.transport.drainDiagnostics()
+        check(d.clampedTicks == 0 && d.peakRate < 200,
               "crossing vertical is not a discontinuity — \(name)",
-              String(format: "%d frames limited, peak rate %.0f°/s (was 8352 on the hike)",
-                     clamped, peakRate))
-        check(biggestStep(out) < 3,
-              "and the field turns in small steps through it — \(name)",
-              String(format: "largest %.2f° per frame", biggestStep(out)))
+              String(format: "%d cycles limited, peak rate %.0f°/s (was 8352 on the hike)",
+                     d.clampedTicks, d.peakRate))
+        let steps = biggestStep(Array(rig.written[max(0, mark - 1)...]))
+        check(steps < 3, "and the field turns in small steps through it — \(name)",
+              String(format: "largest %.2f° per cycle", steps))
     }
 
-    // 6b. The rewrite must not have moved the field.
+    // 6d. The rewrite must not have moved the field.
     //
     // The reason this is safe to ship into a notarized Mac app whose spatial image was
     // tuned by ear: driving `listenerVectorOrientation` from a conjugated quaternion has
@@ -608,10 +701,10 @@ do {
     // orientation and reading the vector one back makes it state its own mapping.
     let env = AVAudioEnvironmentNode()
     var worstVector = 0.0
-    var seed = 12345.0
+    var rseed = 12345.0
     func rnd() -> Double {
-        seed = (seed * 1103515245 + 12345).truncatingRemainder(dividingBy: 2147483648)
-        return seed / 2147483648
+        rseed = (rseed * 1103515245 + 12345).truncatingRemainder(dividingBy: 2147483648)
+        return rseed / 2147483648
     }
     for _ in 0..<400 {
         // Away from ±90° pitch, where the path being replaced was meaningful at all.
@@ -619,7 +712,7 @@ do {
         env.listenerAngularOrientation = AVAudio3DAngularOrientation(
             yaw: Float(-y), pitch: Float(-p), roll: Float(-r))
         let shipped = env.listenerVectorOrientation
-        let ours = HeadSmoother.listener(HeadSmoother.rotation(yaw: y, pitch: p, roll: r))
+        let ours = HeadMath.listener(HeadMath.rotation(yaw: y, pitch: p, roll: r))
         // Compared component by component, not as an angle: `acos` of a dot product
         // near 1 amplifies Float32 rounding into a spurious ~0.03°, and the node stores
         // these as Float, so an angular comparison here measures the storage rather
@@ -647,7 +740,7 @@ do {
 // asking exactly that question one step too late.
 print("\n— the gaze histogram —")
 do {
-    var h = HeadTracker.TiltHistogram()
+    var h = HeadTransport.TiltHistogram()
     for v in [-80.0, -40, 0, 0, 0, 40, 80] { h.add(v) }
     check(abs(h.lowest - -80) < 0.001, "keeps the lowest gaze it saw",
           String(format: "%.1f", h.lowest))
@@ -658,10 +751,10 @@ do {
 
     // The distinction the whole thing exists to draw: a head that sat craned upward
     // must not read the same as one that was level and glanced up once.
-    var craned = HeadTracker.TiltHistogram()
+    var craned = HeadTransport.TiltHistogram()
     for _ in 0..<100 { craned.add(78) }
     craned.add(-5)
-    var level = HeadTracker.TiltHistogram()
+    var level = HeadTransport.TiltHistogram()
     for _ in 0..<100 { level.add(2) }
     level.add(78)
     check(craned.median > 70, "a head held craned reads as craned",
@@ -672,11 +765,11 @@ do {
           "though both report the same extreme — which is why the peak alone could not tell them apart")
 
     // Saturation, since real gaze reaches the ends.
-    var ends = HeadTracker.TiltHistogram()
+    var ends = HeadTransport.TiltHistogram()
     ends.add(-90); ends.add(90)
     check(ends.lowest == -90 && ends.highest == 90, "the poles land in range, not out of bounds")
 
-    var empty = HeadTracker.TiltHistogram()
+    var empty = HeadTransport.TiltHistogram()
     check(empty.isEmpty && empty.median == 0, "an empty window reports nothing rather than a spurious zero")
     empty.add(30)
     empty.reset()

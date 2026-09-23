@@ -110,7 +110,7 @@ final class LaunchpadController {
     init(model: ThrumModel) {
         self.model = model
         surface = LaunchpadSurface(
-            clientName: "Thrum", deviceName: "Launchpad X", portHint: "MIDI",
+            clientName: "Thrum", deviceNames: ["Launchpad X", "LPX"], portHint: "MIDI",
             onConnect: { [weak self] ok in
                 Task { @MainActor in
                     self?.model.launchpadConnected = ok

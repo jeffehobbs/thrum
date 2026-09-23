@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreMotion
 import simd
+import os
 
 /// Where the drone sits around you, and which way your head is pointing.
 ///
@@ -47,17 +48,52 @@ public struct SpatialField {
     }
 }
 
+// MARK: - The head-tracking transport
+//
+// From a CoreMotion sample to sixteen HRTFs being re-pointed, in five pieces, each
+// one a value type with no CoreMotion and no threads in it:
+//
+//   HeadMath       the rotation arithmetic — frame change, quaternion log, twist
+//   HeadReference  the leaky heading: the one thing the transport keeps a reference to
+//   HeadSmoother   the geodesic one-pole and the slew limit
+//   HeadTransport  the pipeline: samples in on the sensor's clock, orientations out
+//                  on the audio's
+//   HeadTracker    the only object with CoreMotion, a lock and a thread in it
+//
+// The split that matters is the one inside `HeadTransport`, and it is the point of
+// this rewrite. Head tracking used to run entirely on the sensor's schedule: every
+// CoreMotion callback smoothed, limited and *wrote to the environment node*, with a
+// dead band and a 45 ms rate cap in the host deciding which of those writes went
+// through. Three clocks were involved — the AirPods at 50 Hz, the rate cap at 22 Hz,
+// and the render cycle reading the result at whatever the IO buffer made it — and
+// none of them was locked to the others. The node only ever *applies* an orientation
+// at the start of a render cycle, so what the ear got was the head's path sampled
+// by the beat frequency between three unrelated timers: sometimes two writes fell in
+// one cycle and one was discarded, sometimes none fell and the field held for a
+// cycle then moved twice as far. Every smoothing constant in the chain was tuned
+// against that jitter without anyone knowing it was there.
+//
+// Now the sensor only *deposits* a target, and the field is advanced toward it by
+// the render clock: `HeadTracker` is ticked once per render cycle by the host's
+// pump, and each tick moves the smoother by the true elapsed time and hands the
+// node exactly one orientation, which the very next cycle applies. The sensor may
+// jitter, batch, or stall — the field's motion is a function of the audio clock
+// alone, so it is as even as the audio is.
+//
+// `Tools/handover` measured what this buys against the node itself, and it decided
+// two host-side settings that go with it — see `FlowHost.buildGraph` and
+// `FlowHost.preferredBufferDuration`.
+
 /// One head orientation, in the two forms the rest of the app needs it.
 ///
-/// `forward`/`up` are what the environment node is actually driven with. The three
-/// angles are for the readout and for tests, and they are derived *from* the
-/// rotation rather than being the thing carried around — see `HeadSmoother`.
-public struct HeadOrientation {
+/// `orientation` is what the environment node is driven with. The three angles are
+/// for the readout and for tests, derived *from* the rotation rather than being
+/// the thing carried around. They still go degenerate at pitch = ±90°, which is
+/// harmless: nothing downstream reads them, and a number on a settings sheet being
+/// briefly ill-conditioned is not sixteen HRTFs being re-pointed.
+public struct HeadOrientation: Sendable {
     public var orientation: AVAudio3DVectorOrientation
-    /// CoreMotion-convention angles, in degrees. Display only. These still go
-    /// degenerate at pitch = ±90°, which is now harmless: nothing downstream reads
-    /// them, and a number on a settings sheet being briefly ill-conditioned is not
-    /// sixteen HRTFs being re-pointed.
+    /// CoreMotion-convention angles, in degrees. Display only.
     public var yaw: Double, pitch: Double, roll: Double
 
     public static let identity = HeadOrientation(
@@ -65,190 +101,68 @@ public struct HeadOrientation {
             forward: AVAudio3DVector(x: 0, y: 0, z: -1),
             up: AVAudio3DVector(x: 0, y: 1, z: 0)),
         yaw: 0, pitch: 0, roll: 0)
-}
 
-/// What one sample through the transport produced.
-public struct HeadStep {
-    public var head: HeadOrientation
-    /// True angular speed of the *input* between this sample and the last, in
-    /// degrees per second — the geodesic rate, not a per-axis one. This is the
-    /// number that says whether a stream of samples is physically possible.
-    public var rate: Double
-    public var clamped: Bool
-
-    public var yaw: Double { head.yaw }
-    public var pitch: Double { head.pitch }
-    public var roll: Double { head.roll }
-}
-
-/// The transport between one CoreMotion sample and sixteen HRTFs: the smoothing
-/// that turns fifty samples a second into a field that turns rather than clicks,
-/// and the limit that stops a bad sample being a rotation.
-///
-/// Pulled out of `HeadTracker` as a value type with no CoreMotion in it, because
-/// `CMAttitude` has no public initialiser and anything reachable only through one is
-/// untestable by construction. Everything interesting about the head-tracking
-/// transport lives here, so `Tools/spatial` can drive it with a synthetic head.
-///
-/// **This smooths the rotation itself, not three Euler angles, and that is a fix
-/// rather than a tidy-up.** It used to one-pole and rate-limit `CMAttitude`'s
-/// `yaw`, `pitch` and `roll` independently, which is only meaningful while those
-/// three numbers are independent — and they are not. CMAttitude reports Tait-Bryan
-/// angles in Z-X-Y order, so **pitch is the middle axis**, and as pitch approaches
-/// ±90° yaw and roll stop being separable: the same physical rotation can be
-/// written with wildly different pairs of them.
-///
-/// ThrumFlow's flight recorder caught exactly that on a hike (2026-08-12): yaw and
-/// roll taking equal-magnitude steps of up to **168° in a single 20 ms sample**,
-/// agreeing with each other to within 0.02%, while pitch moved at an ordinary
-/// 240°/s — with `overruns 0` and `motion 1500/30s` on the very same lines, so
-/// neither the render path nor the sensor was involved. Offline, no spike at all
-/// appears while relative pitch stays under ~75°; past 80° the rates hit ~9000°/s
-/// with the yaw/roll agreement that fingerprints the singularity.
-///
-/// The rotation was smooth throughout. Only its decomposition was degenerate — but
-/// the smoother could not know that, so it saw a 168° step and `maxDegreesPerSecond`
-/// faithfully paid it out at 400°/s. **That is why the symptom is a warble lasting
-/// nearly half a second rather than a click**, and why it is worst in the high end,
-/// where elevation is carried by pinna notches at 5–10 kHz. The guard was doing its
-/// job on a lie.
-///
-/// Why pitch reached ±90° at all, given nobody looks straight up on a trail: it was
-/// *relative* pitch, measured from a reference captured on the first sample after
-/// `start()` — i.e. while the listener was looking down at the phone to press it.
-/// That offset the whole session by 50–60°, so an ordinary nod crossed vertical.
-/// As of 08-21 that reference no longer exists: elevation is gravity-anchored per
-/// sample and only the yaw heading is referenced — see `HeadTracker.leak` — so the
-/// smoother's input can only reach ±90° if the head genuinely does.
-///
-/// Carrying a quaternion removes the failure mode instead of damping it: there is
-/// no chart to fall off, `simd_slerp` takes the short way round on all three axes
-/// at once (which the old code had to hand-fix per axis, and had missed on roll
-/// until 1.4), and the rate handed to the flight recorder is the head's true
-/// angular speed rather than an artifact of the chart.
-public struct HeadSmoother {
-    /// The one-pole's time constant, in seconds — enough to make the motion
-    /// continuous without the room feeling like it lags the head.
-    ///
-    /// Expressed as a *time* rather than a per-sample coefficient, and that is a fix
-    /// rather than a tidy-up. This was `smoothing = 0.28`, applied once per sample
-    /// with no reference to `dt`, and documented as "~90 ms at CoreMotion's
-    /// twenty-five samples a second". The second half of that sentence was the bug:
-    /// a bare coefficient *is* a time constant divided by the sensor's rate, so it
-    /// only means 0.12 s if the sensor really delivers 25 Hz.
-    ///
-    /// ThrumFlow's own flight recorder says it does not. Every AirPods Pro 2 session
-    /// in the log reports `motion 1500/30s` — 50 Hz, dead on, twice the assumed rate
-    /// — which made the real time constant 61 ms instead of 122 ms. Half the
-    /// intended smoothing, so every head movement reached sixteen HRTFs about twice
-    /// as twitchy as designed, on the one platform the feature was written for.
-    ///
-    /// 0.12 s is chosen to reproduce the old coefficient exactly at the rate it was
-    /// tuned for: 1 − exp(−0.04/0.12) = 0.283. So nothing changes at 25 Hz, and at
-    /// 50 Hz the smoothing is what it always claimed to be.
-    public static let timeConstant = 0.12
-
-    /// The per-sample coefficient for a given sample interval.
-    public static func coefficient(for dt: Double) -> Double {
-        1 - exp(-max(dt, 0.0001) / timeConstant)
+    /// Gaze elevation, in degrees, off the forward vector rather than the Euler
+    /// readout — `asin(forward.y)` is well-conditioned everywhere on the sphere.
+    public var gaze: Double {
+        asin(max(-1, min(1, Double(orientation.forward.y)))) * 180 / .pi
     }
 
-    /// The fastest the field is allowed to rotate, in degrees per second.
-    ///
-    /// Not a comfort feature — a limit on how wrong one bad sample can be. A head
-    /// turns at 100–200°/s in ordinary use and perhaps 500°/s if something startles
-    /// you, so at 400°/s this never touches a real movement. What it does touch is a
-    /// *discontinuity*: an Euler angle that wraps, a reference re-seated mid-movement,
-    /// or a dropped-and-resumed batch of Bluetooth samples all arrive as one enormous
-    /// step, and a one-pole turns a 180° step into a 50° jump in a single 40 ms frame.
-    /// Sixteen HRTFs re-pointed by 50° between one buffer and the next is not a
-    /// rotation, it is an event — and an intermittent one, on whichever axis wrapped.
-    public static let maxDegreesPerSecond = 400.0
+    /// The shorter rotation between two orientations, in degrees, measured on the
+    /// vectors the node is driven with. Chord length is the angle to well within
+    /// rounding at the sizes this is used for, and needs no trig; taking the larger
+    /// of the two axes means a pure roll — which leaves `forward` alone — counts.
+    public func separation(from other: HeadOrientation) -> Double {
+        func chord(_ a: AVAudio3DVector, _ b: AVAudio3DVector) -> Double {
+            let dx = Double(a.x - b.x), dy = Double(a.y - b.y), dz = Double(a.z - b.z)
+            return (dx * dx + dy * dy + dz * dz).squareRoot()
+        }
+        return max(chord(orientation.forward, other.orientation.forward),
+                   chord(orientation.up, other.orientation.up)) * 180 / .pi
+    }
+}
 
-    /// The longest gap between samples still treated as elapsed time when easing
-    /// toward a new orientation.
-    ///
-    /// Without this the slew limit above is unenforceable against the one thing it
-    /// was written for, and the 08-15 log says so in as many words: 32 stalls of up
-    /// to 2 s, and `clamped 0` on every heartbeat. Both numbers are correct and
-    /// together they are the bug.
-    ///
-    /// Both terms in `step` scale with `dt`, so a long gap relaxes them in exactly
-    /// the wrong direction. At the 50 Hz the AirPods deliver, a one-pole moves 15%
-    /// of the way to a new orientation per sample and the limiter allows 8° —
-    /// sensible. After a 1.3 s gap the one-pole's fraction has risen to 1.000 and
-    /// the limiter allows 520°, so the whole movement the head made while the
-    /// stream was quiet is applied to sixteen HRTFs **in a single frame**, and the
-    /// guard reports nothing because 40° really is less than 520°. A dropped
-    /// Bluetooth batch is named in `maxDegreesPerSecond`'s own doc comment as a
-    /// discontinuity it exists to catch; it was the one case it could not.
-    ///
-    /// Capping the interval makes a resumed stream look like an ordinary sample:
-    /// the field eases to where the head now is over the following few samples,
-    /// at a rate the limiter can and does police. 50 ms is longer than any real
-    /// interval (20 ms at 50 Hz, 40 at 25) so nothing about normal operation
-    /// changes, and short enough that a resumed stream catches up in about a third
-    /// of a second.
-    ///
-    /// What a gap is *replaced* by is the stream's own recent interval rather than
-    /// this constant, which is the difference between the first sample back being
-    /// an ordinary one and it being twice as hard as one: at 50 Hz, substituting
-    /// 50 ms would move the field 13.6° of a 40° movement in one frame where a real
-    /// sample moves 6.1°. This threshold only decides *what counts as* a gap.
-    ///
-    /// Only the easing is capped. The leak still gets the true `dt`, because drift
-    /// genuinely did accumulate for the whole gap and draining it is not an event
-    /// anyone hears; and the reported rate still uses it, because the diagnostics'
-    /// job is to describe the input rather than to flatter it.
-    public static let maxCatchUpInterval = 0.05
-
+/// The rotation arithmetic, with nothing stateful in it.
+///
+/// Everything here is on quaternions, and that is a fix rather than a style. The
+/// transport used to smooth and rate-limit `CMAttitude`'s `yaw`, `pitch` and `roll`
+/// as three independent signals, which they are not: CMAttitude reports Tait-Bryan
+/// angles in Z-X-Y order, so **pitch is the middle axis**, and as pitch approaches
+/// ±90° yaw and roll stop being separable. ThrumFlow's flight recorder caught the
+/// consequence on a hike (2026-08-12): yaw and roll taking equal steps of up to 168°
+/// in one 20 ms sample, agreeing to 0.02%, while the underlying rotation moved at a
+/// walk. The slew limit faithfully paid the phantom step out at 400°/s, which is why
+/// it was heard as a half-second warble rather than a click. A quaternion has no
+/// chart to fall off; the only Euler angles formed anywhere are the readout's.
+public enum HeadMath {
     public static let identity = simd_quatd(ix: 0, iy: 0, iz: 0, r: 1)
 
     /// The change of frame from CoreMotion's axes to the environment node's, as a
     /// rotation to conjugate by.
     ///
-    /// This is the same handedness reconciliation the app has always applied, in a
-    /// form that survives the singularity. Both halves were *measured*, not read out
-    /// of documentation, because deriving this by hand got it backwards once already:
+    /// Both halves were *measured*, not read out of documentation, because deriving
+    /// this by hand got it backwards once already:
     ///
-    /// - `Tools/axis` established the node's own conventions by asking which ear a
-    ///   source lands in: positions are −z ahead, +x right, +y up, and positive
-    ///   listener yaw/roll turn the listener clockwise where positive CoreMotion
-    ///   attitude is counterclockwise. Hence the long-standing `(-yaw, -pitch, -roll)`.
+    /// - `Tools/axis` established the node's conventions by asking which ear a source
+    ///   lands in: positions are −z ahead, +x right, +y up, and positive listener
+    ///   yaw/roll turn the listener clockwise where positive CoreMotion attitude is
+    ///   counterclockwise. Hence the long-standing `(-yaw, -pitch, -roll)`.
     /// - Reading `listenerVectorOrientation` back after *setting*
-    ///   `listenerAngularOrientation` makes the node state its angular-to-vector
-    ///   mapping itself: `R = Ry(−yaw)·Rx(pitch)·Rz(−roll)`.
+    ///   `listenerAngularOrientation` makes the node state its own angular-to-vector
+    ///   mapping: `R = Ry(−yaw)·Rx(pitch)·Rz(−roll)`.
     ///
-    /// Composing those two says the shipped negation is exactly a 180° rotation about
+    /// Composing those says the shipped negation is exactly a 180° rotation about
     /// (0, 1, 1)/√2 — it sends CoreMotion's (right, forward, up) onto the node's
-    /// (−x, z, y). That it is a *pure frame change* is the load-bearing part, and it
-    /// was checked rather than assumed: conjugating by this and taking the node's own
-    /// vectors agrees to **0.000000** across 400 random combined rotations, against
-    /// the angular path the app shipped. So this rewrite cannot have moved the field,
-    /// which for a notarized Mac app is the whole question. The same check identified
-    /// CMAttitude's Euler order as Z-X-Y (the only one of six that matched), which is
-    /// what makes pitch the middle axis and puts the singularity at ±90°.
+    /// (−x, z, y). That it is a *pure frame change* was checked rather than assumed:
+    /// conjugating by this and taking the node's own vectors agrees to 0.000000 across
+    /// 400 random rotations against the angular path the app shipped, so the rewrite
+    /// cannot have moved the field. The same check identified CMAttitude's Euler order
+    /// as Z-X-Y — the only one of six that matched.
     static let toListener = simd_quatd(angle: .pi,
-                                      axis: simd_normalize(simd_double3(0, 1, 1)))
+                                       axis: simd_normalize(simd_double3(0, 1, 1)))
 
-    /// Smoothed head rotation, in CoreMotion's frame. Starts at identity rather than
-    /// snapping to the first sample, so a fresh reference glides in from dead ahead.
-    private var current = Self.identity
-    /// The previous *input*, kept only so the reported rate is the rate the sensor
-    /// claimed the head was moving. Measuring it against the smoother's own output
-    /// instead reports the tracking lag divided by the smoothing constant — an
-    /// ordinary 50°/s nod reads as 171°/s that way, which would make the one number
-    /// whose job is to say "this stream is not physically possible" say it always.
-    private var previous: simd_quatd?
-    /// What this stream's sample interval has recently been, so a late sample can
-    /// be eased in as though it were an ordinary one. Nil until the first sample.
-    private var typicalInterval: Double?
-
-    public init() {}
-
-    /// Into ±180°, so crossing the back of the head doesn't spin the field the long
-    /// way round. Kept for the readout and for tests; the transport no longer needs
-    /// it, because a geodesic has no seam to wrap at.
+    /// Into ±180°. For the readout and for tests; the transport has no seam to wrap
+    /// at, because a geodesic has none.
     public static func wrap(_ d: Double) -> Double {
         var v = (d + 180).truncatingRemainder(dividingBy: 360) - 180
         if v < -180 { v += 360 }
@@ -256,7 +170,7 @@ public struct HeadSmoother {
     }
 
     /// Angle of the shorter rotation between two orientations, in degrees.
-    static func angle(_ a: simd_quatd, _ b: simd_quatd) -> Double {
+    public static func angle(_ a: simd_quatd, _ b: simd_quatd) -> Double {
         // |dot| rather than dot: q and −q are the same rotation, and taking the
         // absolute value is what picks the short arc.
         let d = min(1.0, abs(simd_dot(a, b)))
@@ -265,17 +179,14 @@ public struct HeadSmoother {
 
     /// A rotation as an axis scaled by its angle in radians — the quaternion log.
     ///
-    /// Needed because `HeadTracker`'s drift leak has to treat one component of a
-    /// rotation differently from the rest, and a quaternion offers nowhere to make
-    /// that cut. A rotation vector does: it is an ordinary `simd_double3`, so the
-    /// yaw part is a projection onto the vertical and the elevation part is what is
-    /// left. Splitting Euler angles instead would reintroduce the exact chart that
-    /// put a 168° step in the log — the whole point of this type is that nothing on
-    /// the transport forms one.
+    /// The heading leak has to treat one component of a rotation differently from
+    /// the rest, and a quaternion offers nowhere to make that cut. A rotation vector
+    /// does: the yaw part is a projection onto the vertical and the elevation part is
+    /// what is left. Splitting Euler angles instead would reintroduce the exact chart
+    /// that put a 168° step in the log.
     static func rotationVector(_ q: simd_quatd) -> simd_double3 {
-        // q and −q are the same rotation but their logs point opposite ways; taking
-        // the positive-real form is what keeps the leak pulling the short way round
-        // instead of walking the long way through 360°.
+        // q and −q are the same rotation but their logs point opposite ways; the
+        // positive-real form is what keeps the leak pulling the short way round.
         var imag = q.imag, real = q.real
         if real < 0 { imag = -imag; real = -real }
         let s = simd_length(imag)
@@ -294,15 +205,14 @@ public struct HeadSmoother {
     /// contained in `q`, with the swing (everything about any perpendicular axis)
     /// divided off.
     ///
-    /// This is how the heading leak is seeded: the head's yaw about the world's
-    /// vertical, with its pitch and roll never entering. Both decompositions share
-    /// it — `q = twist · swing` and `q = swing′ · twist` have the *same* twist, only
-    /// conjugated swings — so no order convention is needed here.
+    /// This is how the heading is seeded: the head's yaw about the world's vertical,
+    /// with its pitch and roll never entering. Both decompositions share it —
+    /// `q = twist · swing` and `q = swing′ · twist` have the *same* twist — so no order
+    /// convention is needed here.
     ///
     /// Degenerate when the rotation carries the axis to its opposite (a 180° swing),
-    /// where "how much of this is yaw" genuinely has no answer; identity is returned
-    /// and a caller seeding from it starts dead ahead, which is the only honest
-    /// choice available.
+    /// where "how much of this is yaw" has no answer; identity is returned and a
+    /// caller seeding from it starts dead ahead, which is the only honest choice.
     public static func twist(_ q: simd_quatd, about axis: simd_double3) -> simd_quatd {
         let proj = simd_dot(q.imag, axis) * axis
         let t = simd_double4(proj.x, proj.y, proj.z, q.real)
@@ -311,33 +221,12 @@ public struct HeadSmoother {
         return simd_quatd(vector: t / len)
     }
 
-    /// One step of the drift leak: the correction moved a little way toward the
-    /// current orientation, yaw and elevation at their own rates.
-    ///
-    /// Pulled out of `HeadTracker.ingest` so it can be measured rather than reasoned
-    /// about — the same reason `toListener` is a constant and not three negations.
-    /// `Tools/drift` drives it against the drift rate the 08-14 log actually recorded.
-    ///
-    /// Composed on the *left* throughout, which is what makes `up` mean anything: left
-    /// multiplication is a rotation in the reference frame, where `up` lives, and right
-    /// multiplication would be one in the head's own frame, where the split would
-    /// follow the head around and each time constant would land on the wrong axis.
-    public static func leaked(_ leak: simd_quatd, toward rel: simd_quatd,
-                              up: simd_double3, dt: Double,
-                              elevation: Double, yaw: Double) -> simd_quatd {
-        let v = rotationVector(rel * leak.conjugate)
-        let yawPart = simd_dot(v, up) * up
-        let scaled = yawPart * (1 - exp(-dt / yaw))
-                   + (v - yawPart) * (1 - exp(-dt / elevation))
-        return rotation(vector: scaled) * leak
-    }
-
     /// CoreMotion's Euler angles, composed into the rotation they describe.
     ///
     /// Z-X-Y, per the measurement above: `Rz(yaw)·Rx(pitch)·Ry(roll)`. Composing and
-    /// then decomposing is lossless away from the singularity and, more to the point,
-    /// *cancels* the degenerate yaw/roll split at it — which is why feeding this path
-    /// the very angle pairs that used to produce a 168° lurch now produces none.
+    /// then decomposing is lossless away from the singularity and *cancels* the
+    /// degenerate yaw/roll split at it — which is why feeding this path the very
+    /// angle pairs that used to produce a 168° lurch produces none.
     public static func rotation(yaw: Double, pitch: Double, roll: Double) -> simd_quatd {
         let d = Double.pi / 180
         return simd_quatd(angle: yaw * d, axis: simd_double3(0, 0, 1))
@@ -346,7 +235,7 @@ public struct HeadSmoother {
     }
 
     /// And back out again, for the readout only.
-    static func euler(_ q: simd_quatd) -> (yaw: Double, pitch: Double, roll: Double) {
+    public static func euler(_ q: simd_quatd) -> (yaw: Double, pitch: Double, roll: Double) {
         // Read off the columns rather than indexing a matrix, because simd is
         // column-major and row/column confusion here is silent and wrong.
         let ex = q.act(simd_double3(1, 0, 0))
@@ -359,7 +248,7 @@ public struct HeadSmoother {
     }
 
     /// The orientation as the environment node wants it.
-    static func listener(_ q: simd_quatd) -> AVAudio3DVectorOrientation {
+    public static func listener(_ q: simd_quatd) -> AVAudio3DVectorOrientation {
         let l = toListener * q * toListener.conjugate
         let f = l.act(simd_double3(0, 0, -1))
         let u = l.act(simd_double3(0, 1, 0))
@@ -368,29 +257,150 @@ public struct HeadSmoother {
             up: AVAudio3DVector(x: Float(u.x), y: Float(u.y), z: Float(u.z)))
     }
 
-    /// One sample in, the smoothed orientation out — plus what it took to get there,
-    /// which is what the flight recorder reports.
-    ///
-    /// The real entry point. `CMAttitude.quaternion` is singularity-free, so nothing
-    /// on this path ever forms an Euler angle except the readout at the end.
-    public mutating func step(rotation target: simd_quatd, dt: Double) -> HeadStep {
-        // Not `dt` — see `maxCatchUpInterval`. A gap in the stream must not buy the
-        // field permission to jump, so a late sample is eased in as though it had
-        // arrived on time, at whatever "on time" has recently meant.
-        let ease: Double
-        if dt <= Self.maxCatchUpInterval {
-            typicalInterval = typicalInterval.map { $0 * 0.9 + dt * 0.1 } ?? dt
-            ease = dt
-        } else {
-            ease = typicalInterval ?? Self.maxCatchUpInterval
-        }
-        let limit = Self.maxDegreesPerSecond * ease
-        let smoothing = Self.coefficient(for: ease)
+    /// Both forms at once.
+    public static func orientation(_ q: simd_quatd) -> HeadOrientation {
+        let e = euler(q)
+        return HeadOrientation(orientation: listener(q), yaw: e.yaw, pitch: e.pitch, roll: e.roll)
+    }
 
-        // The one-pole, on the geodesic: move a fixed fraction of the remaining
-        // rotation each sample, exactly as before, but along the shortest arc through
-        // orientation space rather than along three independent number lines.
-        let remaining = Self.angle(current, target)
+    /// Gaze elevation of a rotation, in degrees, through the same frame change the
+    /// node sees — so a raw attitude and a referenced one are directly comparable.
+    public static func tilt(_ q: simd_quatd) -> Double {
+        orientation(q).gaze
+    }
+}
+
+/// The leaky *heading* — a pure twist about the world's vertical, and the only
+/// reference the transport keeps.
+///
+/// **Elevation and roll are never referenced at all.** The tracker used to divide a
+/// full attitude out of every sample: a reference captured on the first sample after
+/// `start()`, plus a leak chasing the whole referenced orientation. Mark #1 of the
+/// 08-21 walk caught what that costs: the orientation handed to the environment node
+/// sat at +69…+76° elevation for two seconds while the raw head sat at +22…27°,
+/// moved *opposite* to the head, then snapped 67° in half a second — with overruns,
+/// gaps, stalls and clamped all zero. The mechanism was structural: elevation was
+/// derived from two orientation-referenced quantities, so any yaw-side error (the
+/// sensor re-seating its own drifting yaw frame, the leak lagging a held turn, an
+/// oblique start) conjugated into *elevation*, the axis the ear is most sensitive to.
+///
+/// So the swing comes from gravity and only the twist is referenced:
+///
+/// - **Pitch and roll** are taken from the attitude's own gravity-referenced swing,
+///   per sample, absolutely. No reference biases them, no leak drains them, and no
+///   path exists by which yaw error can become elevation. A neck bounds the result to
+///   roughly ±70°, so the ±90° pole where azimuths whip is unreachable.
+/// - **Yaw** has no absolute observation (gravity cannot see it, and AirPods yaw
+///   genuinely drifts), so it is measured against this heading: seeded from the head's
+///   twist on the first sample, drained toward the current twist with a ~120 s time
+///   constant. The cost: hold a deliberate turn and the field slowly decides that is
+///   forward. `Tools/heading` and `Tools/drift` measure both halves.
+public struct HeadReference {
+    /// Yaw drains with this time constant, in seconds.
+    public static let yawTimeConstant = 120.0
+
+    private var heading = HeadMath.identity
+    private var seeded = false
+
+    public init() {}
+
+    /// One step of the leak: the correction moved a little way toward the current
+    /// orientation, yaw and elevation at their own rates.
+    ///
+    /// Composed on the *left* throughout, which is what makes `up` mean anything: left
+    /// multiplication is a rotation in the reference frame, where `up` lives; right
+    /// multiplication would be one in the head's own frame, where the split would
+    /// follow the head around and each time constant would land on the wrong axis.
+    /// The transport passes `elevation: .infinity` — the swing is absolute, so there is
+    /// no elevation drift to drain and the leak must never acquire a component off the
+    /// vertical. The parameter exists so `Tools/heading` can reconstruct the old
+    /// composition and show it contained the bug.
+    public static func leaked(_ leak: simd_quatd, toward rel: simd_quatd,
+                              up: simd_double3, dt: Double,
+                              elevation: Double, yaw: Double) -> simd_quatd {
+        let v = HeadMath.rotationVector(rel * leak.conjugate)
+        let yawPart = simd_dot(v, up) * up
+        let scaled = yawPart * (1 - exp(-dt / yaw))
+                   + (v - yawPart) * (1 - exp(-dt / elevation))
+        return HeadMath.rotation(vector: scaled) * leak
+    }
+
+    /// The attitude with the heading divided out — the head's true gravity swing plus
+    /// its yaw relative to the leaky heading — and the heading advanced.
+    ///
+    /// Divided out on the left: a rotation in the world frame, where the vertical
+    /// lives. A nod is a pure pitch of the result at any heading, and nothing on the
+    /// yaw axis can reach its elevation, because `heading` is a twist about the very
+    /// axis elevation is measured from.
+    public mutating func referenced(_ attitude: simd_quatd, up: simd_double3,
+                                    dt: Double) -> simd_quatd {
+        if !seeded {
+            heading = HeadMath.twist(attitude, about: up)
+            seeded = true
+        }
+        let corrected = heading.conjugate * attitude
+        heading = Self.leaked(heading, toward: attitude, up: up, dt: dt,
+                              elevation: .infinity, yaw: Self.yawTimeConstant)
+        return corrected
+    }
+
+    /// Re-seat from the next sample's twist.
+    public mutating func reset() {
+        heading = HeadMath.identity
+        seeded = false
+    }
+}
+
+/// The geodesic one-pole and the slew limit — the smoothing that turns a stream of
+/// targets into a field that turns rather than clicks, and the limit that stops a
+/// bad sample being a rotation.
+///
+/// Stepped by whoever owns the clock, with the true elapsed time. It has no opinion
+/// about where its `dt` comes from, and that is the difference from the version it
+/// replaces, which was stepped once per *sensor sample* and had to guess at what a
+/// long gap meant (see `HeadTransport` for what happens to a stall now).
+public struct HeadSmoother {
+    /// The one-pole's time constant, in seconds — enough to make the motion
+    /// continuous without the room feeling like it lags the head.
+    ///
+    /// A *time*, not a per-sample coefficient. This was `smoothing = 0.28` applied
+    /// once per sample, documented as "~90 ms at CoreMotion's twenty-five samples a
+    /// second" — but AirPods Pro 2 deliver 50 Hz (`motion 1500/30s` in every logged
+    /// session), which made the real time constant 61 ms and every head movement
+    /// twice as twitchy as designed. 0.12 s reproduces the old coefficient exactly at
+    /// the rate it was tuned for: 1 − exp(−0.04/0.12) = 0.283.
+    public static let timeConstant = 0.12
+
+    /// The per-sample coefficient for a given interval.
+    public static func coefficient(for dt: Double) -> Double {
+        1 - exp(-max(dt, 0.0001) / timeConstant)
+    }
+
+    /// The fastest the field is allowed to rotate, in degrees per second.
+    ///
+    /// Not a comfort feature — a limit on how wrong one bad sample can be. A head
+    /// turns at 100–200°/s in ordinary use and perhaps 500°/s if something startles
+    /// you, so at 400°/s this never touches a real movement. What it does touch is a
+    /// *discontinuity*: a reference re-seated mid-movement, or a dropped-and-resumed
+    /// batch of Bluetooth samples arriving as one enormous step. Sixteen HRTFs
+    /// re-pointed by 50° between one cycle and the next is not a rotation, it is an
+    /// event.
+    public static let maxDegreesPerSecond = 400.0
+
+    /// Where the field is. Starts at identity rather than snapping to the first
+    /// target, so a fresh reference glides in from dead ahead.
+    public private(set) var current = HeadMath.identity
+
+    public init() {}
+
+    /// Move a fixed fraction of the remaining rotation toward `target`, along the
+    /// shortest arc through orientation space rather than along three independent
+    /// number lines. Returns whether the slew limit had to intervene.
+    public mutating func step(toward target: simd_quatd, dt: Double) -> Bool {
+        let dt = max(dt, 0.0001)
+        let limit = Self.maxDegreesPerSecond * dt
+        let smoothing = Self.coefficient(for: dt)
+        let remaining = HeadMath.angle(current, target)
         var fraction = smoothing
         var clamped = false
         if remaining * smoothing > limit {
@@ -400,41 +410,298 @@ public struct HeadSmoother {
         if remaining > 1e-9 {
             current = simd_normalize(simd_slerp(current, target, fraction))
         }
-
-        // Against the previous input, not against our own output.
-        let rate = previous.map { Self.angle($0, target) / dt } ?? 0
-        previous = target
-
-        let e = Self.euler(current)
-        return HeadStep(head: HeadOrientation(orientation: Self.listener(current),
-                                              yaw: e.yaw, pitch: e.pitch, roll: e.roll),
-                        rate: rate, clamped: clamped)
+        return clamped
     }
 
-    /// Euler-angle convenience, so `Tools/spatial` can drive a synthetic head without
-    /// a `CMAttitude` it has no way to build.
-    public mutating func step(yaw: Double, pitch: Double, roll: Double,
-                              dt: Double) -> HeadStep {
-        step(rotation: Self.rotation(yaw: yaw, pitch: pitch, roll: roll), dt: dt)
-    }
-
-    /// Where the smoother has got to, in CoreMotion's angles. Readout and tests.
-    public var yaw: Double { Self.euler(current).yaw }
-    public var pitch: Double { Self.euler(current).pitch }
-    public var roll: Double { Self.euler(current).roll }
-    public var orientation: AVAudio3DVectorOrientation { Self.listener(current) }
+    public var orientation: HeadOrientation { HeadMath.orientation(current) }
 }
 
-/// AirPods head orientation, via CoreMotion.
+/// The pipeline between a motion sensor and an environment node, with no sensor
+/// and no node in it: samples come in on one clock, orientations go out on another.
 ///
-/// `CMHeadphoneMotionManager` is `macos(14.0)`, which is Thrum's floor — so this
-/// is a native Mac app reading real head tracking rather than relying on the
-/// system's own Spatialize Stereo. That comes with two consequences worth
-/// knowing: it needs a Motion permission prompt, and it is the only part of
-/// Thrum that can be *denied*. Everything degrades to a head-locked field.
-@MainActor
-public final class HeadTracker: ObservableObject {
-    public enum Status: Equatable {
+/// Single-threaded by construction — `HeadTracker` serialises access, and the
+/// offline harnesses (`Tools/spatial`) drive both sides from one loop. The two
+/// entry points:
+///
+/// - `ingest` is the **sensor side**. It runs the heading reference and deposits a
+///   target. It never touches the smoother and never produces an orientation.
+/// - `advance` is the **clock side**. It moves the smoother toward the current target
+///   by the time actually elapsed since the last tick and returns the orientation to
+///   hand the node — or nil when nothing worth a write has changed.
+///
+/// What this does to a stall in the motion stream is the reason for the split. The
+/// 08-15 log had 32 stalls of up to 2 s and `clamped 0` on every heartbeat, because
+/// the smoother was stepped per *sample* and both its terms scaled with the interval:
+/// after a 1.3 s gap the one-pole's fraction was 1.000 and the limiter allowed 520°,
+/// so everything the head did during the gap landed on sixteen HRTFs in a single
+/// frame and the guard reported nothing because 40° is less than 520°. That took a
+/// special case (`maxCatchUpInterval`) to paper over. Here there is nothing to paper:
+/// during a stall the target simply stops changing and the field settles on it; when
+/// the stream returns the target jumps and the smoother eases toward it at the audio
+/// clock's own cadence, with the slew limit policing every tick as it would any
+/// other. A late sample is not a long `dt`, because `dt` is not the sensor's to set.
+public struct HeadTransport {
+    /// Anything longer than this between samples is a stall rather than jitter.
+    /// AirPods Pro 2 deliver 50 Hz — 20 ms — so this is twelve missed samples, well
+    /// clear of scheduling slop and short enough to catch a freeze the ear would notice.
+    public static let stallThreshold = 0.25
+
+    /// The longest interval one tick is allowed to advance the smoother by.
+    ///
+    /// Ticks stop when the engine pauses and resume when it restarts, and the first
+    /// tick back would otherwise carry the whole pause as one step. Two render cycles
+    /// at the longest buffer the host asks for; nothing about normal operation comes
+    /// near it.
+    public static let maxTick = 0.2
+
+    /// Movement below this, in degrees, is not handed to the node.
+    ///
+    /// Purely a saving of work, and measured to be nothing else: `Tools/handover`
+    /// finds the transport's own residual wander around a still head — a few
+    /// hundredths of a degree, once the one-pole has settled — costs the rendered
+    /// high band 0.001 dB per hop over a listener who never moves at all, on either
+    /// HRTF algorithm. So a write for it re-points sixteen HRTFs for nothing the ear
+    /// can tell. Measured against the last orientation *written*, not the last tick,
+    /// so a slow drift still arrives — in tenth-of-a-degree steps, which at the
+    /// distances involved is a smaller step than the node's own filter grid.
+    public static let deadBand = 0.1
+
+    private var reference = HeadReference()
+    private var smoother = HeadSmoother()
+    /// The latest referenced attitude — where the field is being asked to go.
+    private var target: simd_quatd?
+    private var previousAttitude: simd_quatd?
+    private var lastSampleAt: TimeInterval?
+    private var lastTickAt: TimeInterval?
+    /// What was last handed out, for the dead band and the readout.
+    private var written = HeadOrientation.identity
+    /// An orientation the host has not been handed yet — set at start and by
+    /// `recenter()`, so the very next tick snaps to identity before gliding.
+    private var pendingSnap = true
+
+    public init() {}
+
+    // MARK: Sensor side
+
+    /// One motion sample. `attitude` is `CMAttitude.quaternion` — singularity-free —
+    /// and `gravity` is `CMDeviceMotion.gravity`, in the device frame.
+    public mutating func ingest(attitude: simd_quatd, gravity: simd_double3,
+                                at timestamp: TimeInterval) {
+        // The world's vertical, as the sensor itself measures it this sample.
+        // Gravity arrives in the device frame; carried through the attitude it is the
+        // vertical of the frame the attitude lives in — so the twist axis rests on a
+        // measurement, not on the reference-frame contract. The fallback is that
+        // contract (headphone attitude is z-vertical), for the odd sample where
+        // gravity hasn't settled.
+        let up = simd_length(gravity) > 0.1
+            ? -simd_normalize(attitude.act(gravity))
+            : simd_double3(0, 0, 1)
+
+        let dt = lastSampleAt.map { max(timestamp - $0, 0.001) } ?? 0.02
+        if lastSampleAt != nil, dt > Self.stallThreshold {
+            diagnostics.stalls += 1
+            if dt > diagnostics.longestStall {
+                diagnostics.longestStall = dt
+                // Where the field was when the stream went quiet, not where the head
+                // had got to by the time it came back.
+                diagnostics.tiltAtStall = written.gaze
+            }
+        }
+        lastSampleAt = timestamp
+
+        // The rate is the *sensor's* claim about the head — the geodesic angle between
+        // consecutive samples over their interval. Measuring it against the smoother's
+        // output would report tracking lag over the time constant, which makes an
+        // ordinary 50°/s nod read as 171°/s. Its job is to say whether a stream is
+        // physically possible: a reading above a few hundred means the stream itself
+        // has a step in it.
+        if let previous = previousAttitude {
+            diagnostics.peakRate = max(diagnostics.peakRate, HeadMath.angle(previous, attitude) / dt)
+        }
+        previousAttitude = attitude
+        diagnostics.samples += 1
+
+        target = reference.referenced(attitude, up: up, dt: dt)
+
+        // The same measurement on the unreferenced attitude, through the same frame
+        // change, so it is directly comparable to `tilt`. The heading is a twist and
+        // twists cannot move tilt, so the two histograms should agree to within
+        // smoothing lag; their parting company again on some future walk is the alarm
+        // that an error has found a new path onto the elevation axis.
+        diagnostics.rawTilt = HeadMath.tilt(attitude)
+        diagnostics.raw.add(diagnostics.rawTilt)
+    }
+
+    // MARK: Clock side
+
+    /// One tick of the clock that owns the node. Returns the orientation to write,
+    /// or nil if the field has not moved enough to be worth one.
+    public mutating func advance(to now: TimeInterval) -> HeadOrientation? {
+        let dt = lastTickAt.map { min(max(now - $0, 0.0001), Self.maxTick) } ?? 0.02
+        lastTickAt = now
+
+        if pendingSnap {
+            // A fresh start or a recenter: the field goes to dead ahead *now*, and
+            // glides from there to wherever the head is. A listener who pressed the
+            // button expects exactly that snap; nothing else in here ever produces one.
+            pendingSnap = false
+            written = .identity
+            diagnostics.writes += 1
+            return written
+        }
+        guard let target else { return nil }
+
+        if smoother.step(toward: target, dt: dt) { diagnostics.clampedTicks += 1 }
+        let out = smoother.orientation
+        let tilt = out.gaze
+        if abs(tilt) > abs(diagnostics.peakTilt) { diagnostics.peakTilt = tilt }
+        diagnostics.tilt.add(tilt)
+
+        guard out.separation(from: written) > Self.deadBand else { return nil }
+        written = out
+        diagnostics.writes += 1
+        return out
+    }
+
+    /// Where the field is, for the readout.
+    public var orientation: HeadOrientation { written }
+
+    /// Take the current heading as "facing forward". Only the heading is re-seated —
+    /// elevation comes from gravity and was never wrong, so the button has nothing
+    /// to say about it. The field snaps to dead ahead and settles at the true tilt.
+    public mutating func recenter() {
+        reference.reset()
+        smoother = HeadSmoother()
+        target = nil
+        previousAttitude = nil
+        lastSampleAt = nil
+        lastTickAt = nil
+        pendingSnap = true
+    }
+
+    /// Forget everything, for a stop. Unlike `recenter`, this does *not* queue a
+    /// snap to identity: tracking stops for reasons that have nothing to do with the
+    /// listener wanting the field moved — a route change, a pause, a moment of
+    /// Bluetooth — and a head-locked field should simply stay where it was.
+    public mutating func reset() {
+        recenter()
+        pendingSnap = false
+        written = .identity
+    }
+
+    // MARK: Diagnostics
+
+    /// Where the gaze spent the window, not merely how far it got.
+    ///
+    /// `peakTilt` alone produced the 08-13 anomaly and could not explain it: one
+    /// extreme per thirty-second window cannot say whether the head briefly reached
+    /// that angle or sat there, and those are different faults. Five-degree buckets
+    /// over the whole sphere; coarse on purpose, it is read by eye out of a log line.
+    public struct TiltHistogram {
+        static let buckets = 36
+        static let width = 5.0
+        private var counts = [Int](repeating: 0, count: buckets)
+        public private(set) var lowest = 0.0
+        public private(set) var highest = 0.0
+        private var total = 0
+
+        public init() {}
+
+        public mutating func add(_ degrees: Double) {
+            if total == 0 { lowest = degrees; highest = degrees }
+            lowest = min(lowest, degrees)
+            highest = max(highest, degrees)
+            let i = min(Self.buckets - 1, max(0, Int((degrees + 90) / Self.width)))
+            counts[i] += 1
+            total += 1
+        }
+
+        /// Bucket centre at the halfway point. Approximate by construction, and fine:
+        /// the question is "was the head mostly level or mostly craned".
+        public var median: Double {
+            guard total > 0 else { return 0 }
+            var seen = 0
+            for (i, c) in counts.enumerated() {
+                seen += c
+                if seen >= total / 2 { return -90 + (Double(i) + 0.5) * Self.width }
+            }
+            return 0
+        }
+
+        public var isEmpty: Bool { total == 0 }
+        public mutating func reset() {
+            counts = [Int](repeating: 0, count: Self.buckets)
+            lowest = 0; highest = 0; total = 0
+        }
+    }
+
+    /// What the flight recorder reads every thirty seconds, and why each is here.
+    ///
+    /// - `samples` and `writes` are the two clocks: how many sensor samples arrived
+    ///   and how many orientations went to the node. On a still head the second
+    ///   should be a small fraction of the first; on a moving one it should sit at
+    ///   the render rate and no higher, whatever the sensor does.
+    /// - `peakRate` is how fast the *input* claimed the head moved, `clampedTicks`
+    ///   how often the limit had to intervene on the *output*. Zero means the input
+    ///   was clean and any artefact is somewhere else entirely.
+    /// - `stalls` is the hypothesis the 08-15 walk tested and refuted (stalls are
+    ///   real but not a function of where the head is). Still worth a number.
+    /// - `tilt` against `raw`: the field's gaze against the sensor's. They agree by
+    ///   construction now; their disagreeing again is the alarm.
+    public struct Diagnostics {
+        public var samples = 0
+        public var writes = 0
+        public var peakRate = 0.0
+        public var clampedTicks = 0
+        public var peakTilt = 0.0
+        public var stalls = 0
+        public var longestStall = 0.0
+        public var tiltAtStall = 0.0
+        public var tilt = TiltHistogram()
+        public var raw = TiltHistogram()
+        /// The most recent raw gaze, for instrumentation that samples rather than
+        /// aggregates — see `MarkBuffer`. Not reset by a drain.
+        public var rawTilt = 0.0
+    }
+
+    public private(set) var diagnostics = Diagnostics()
+
+    public mutating func drainDiagnostics() -> Diagnostics {
+        defer {
+            let keep = diagnostics.rawTilt
+            diagnostics = Diagnostics()
+            diagnostics.rawTilt = keep
+        }
+        return diagnostics
+    }
+}
+
+/// AirPods head orientation, via CoreMotion, paced by the audio clock.
+///
+/// `CMHeadphoneMotionManager` is `macos(14.0)`, which is Thrum's floor — so this is
+/// a native app reading real head tracking rather than relying on the system's own
+/// Spatialize Stereo. It needs a Motion permission prompt, and it is the only part
+/// of Thrum that can be *denied*. Everything degrades to a head-locked field.
+///
+/// Three threads meet here, and the structure keeps them apart:
+///
+/// - **CoreMotion's queue** delivers samples — its own serial queue, not `.main`,
+///   because a main thread busy with SwiftUI and a Metal field is exactly the kind
+///   of thread that delivers sensor samples late and in batches. Each sample is
+///   folded into the transport under a lock and nothing else happens.
+/// - **The render thread** calls `tick()` once per cycle, from the host's pump. It
+///   signals a semaphore and returns; nothing is computed and no lock is taken.
+/// - **The pacer** is a dedicated thread that waits on that semaphore. Each wake it
+///   advances the transport by the true elapsed time and hands the result to
+///   `onOrientation`, which the host points at the environment node — so the node
+///   gets exactly one write per render cycle, landing while the cycle that signalled
+///   it is still rendering and applied by the next. If nothing ticks it (spatial off,
+///   or a host that never wired it) it free-runs at `fallbackInterval`.
+///
+/// The `@Published` readout is throttled to 10 Hz on the main queue: SwiftUI does not
+/// need fifty redraws a second to show a number that is only there for reassurance.
+public final class HeadTracker: ObservableObject, @unchecked Sendable {
+    public enum Status: Equatable, Sendable {
         case unsupported          // no motion-capable headphones on this machine
         case needsPermission
         case denied
@@ -452,262 +719,44 @@ public final class HeadTracker: ObservableObject {
         }
     }
 
+    public typealias Diagnostics = HeadTransport.Diagnostics
+    public typealias TiltHistogram = HeadTransport.TiltHistogram
+
     @Published public private(set) var status: Status = .idle
-    /// Recentred head angles in degrees, for the readout.
+    /// Recentred head angles in degrees, for the readout. Main queue, 10 Hz.
     @Published public private(set) var yaw: Double = 0
     @Published public private(set) var pitch: Double = 0
     @Published public private(set) var roll: Double = 0
 
-    /// Full-rate orientation sink — the host points this at the environment
-    /// node. Kept separate from the published values, which are throttled,
-    /// because SwiftUI does not need twenty-five redraws a second to show a
-    /// number that is only there for reassurance.
+    /// The orientation sink — the host points this at the environment node.
     ///
-    /// Carries forward/up vectors rather than three angles. The host used to negate
-    /// the angles itself, on both platforms; that reconciliation now lives once, in
-    /// `HeadSmoother.toListener`, where it can be tested.
+    /// **Called on the pacer thread**, at most once per render cycle, and only when
+    /// the field has moved. Setting `AVAudioEnvironmentNode.listenerVectorOrientation`
+    /// from there is fine: it is a node property, not a render-thread call, and it
+    /// takes the same engine lock from any non-render thread. Set before `start()`.
     public var onOrientation: ((HeadOrientation) -> Void)?
 
+    /// How often the pacer advances the field when nothing is ticking it.
+    public static let fallbackInterval = 0.033
+
     private let manager = CMHeadphoneMotionManager()
-
-    /// The leaky *heading* — a pure twist about the world's vertical, and the only
-    /// reference this tracker keeps.
-    ///
-    /// **Elevation and roll are never referenced at all, and that is the 08-21 fix.**
-    /// The tracker used to divide a full attitude out of every sample: a reference
-    /// captured on the first sample after `start()`, plus this leak chasing the whole
-    /// referenced orientation (elevation τ 30 s, yaw τ 120 s). Mark #1 of the 08-21
-    /// walk caught what that costs: the orientation handed to the environment node sat
-    /// at **+69…+76° elevation for two full seconds while the raw head sat at
-    /// +22…27°**, moved *opposite* to the head, then snapped 67° in half a second —
-    /// twice in the marked window — with overruns, gaps, stalls and clamped all at
-    /// zero. Sixteen HRTFs pointed at a phantom extreme elevation is heard as tones
-    /// flickering and cutting out (pinna notches at 5–10 kHz sweeping the partials),
-    /// while the tap's level barely moves, which is exactly what the log showed.
-    ///
-    /// The mechanism was structural, not a bad constant: elevation was derived
-    /// entirely from `leak⁻¹ · rel` — two orientation-referenced quantities — so any
-    /// yaw-side error (the sensor re-seating its own drifting yaw frame, the leak
-    /// lagging a held turn, an oblique start reference) conjugated into *elevation*,
-    /// the axis the ear is most sensitive to and the readout least able to see: a
-    /// world-yaw re-seat is invisible in the raw tilt column. Offline replay of the
-    /// transport reproduced each signature: a +120° world-yaw step through a
-    /// reference pitched −50° arrives as a ~32° elevation step, holds while the leak
-    /// drains it, and steps back when the sensor seats again.
-    ///
-    /// So the swing now comes from gravity and only the twist is referenced:
-    ///
-    /// - **Pitch and roll** are taken from the attitude's own gravity-referenced
-    ///   swing, per sample, absolutely. There is no reference to bias them, no leak
-    ///   to drain them, and no path by which yaw error can become elevation. The
-    ///   field's elevation equals the head's true elevation, which a neck bounds to
-    ///   roughly ±70° — the ±90° pole, where azimuths whip, is unreachable.
-    /// - **Yaw** has no absolute observation (gravity cannot see it, and AirPods yaw
-    ///   genuinely drifts), so it is measured against this leaky heading: seeded from
-    ///   the head's twist on the first sample, drained toward the current twist with
-    ///   the same ~120 s time constant as before. The cost is unchanged — hold a
-    ///   deliberate turn and the field slowly decides that is forward — and the
-    ///   old elevation-leak cost (37% of an up-glance kept at 30 s) is simply gone:
-    ///   look up and the field now stays put, which is what a stable room does.
-    ///
-    /// `recenter()` still snaps deliberately — it re-seats the heading and resets the
-    /// smoother, because a listener who presses a button expects exactly that. On a
-    /// schedule the same snap would be an event nobody asked for; the leak exists so
-    /// it never has to happen on one.
-    private var leak = HeadSmoother.identity
-    /// Re-seat the heading from the next sample's twist — set at start and by
-    /// `recenter()`, never on a schedule.
-    private var needsHeading = true
-    /// Yaw drains with a ~120 s time constant — see `leak`.
-    private static let yawLeak = 120.0
-
-    private var lastPublish = Date.distantPast
-    /// Smoothed angles. Handing CoreMotion's steps straight to the HRTF zippers —
-    /// you hear the field clicking round rather than turning. A ~120 ms one-pole is
-    /// enough to make it continuous without feeling like the room lags your head.
-    ///
-    /// The rate is *measured*, not assumed: AirPods Pro 2 deliver 50 Hz, which the
-    /// flight recorder reports as `motion 1500/30s`. The docs' "about twenty-five
-    /// times a second" is where the old smoothing constant came from, and it was
-    /// wrong on this hardware by a factor of two — see `HeadSmoother.timeConstant`.
-    private var smoothed: HeadOrientation = .identity
-    private var smoother = HeadSmoother()
-    private var lastSample: TimeInterval?
-
-    /// Diagnostics, read by the host's flight recorder and reset by the reading.
-    ///
-    /// Two numbers, because they answer different questions. `peakRate` says how
-    /// fast the *input* claimed the head was moving, which is what tells you whether
-    /// a listener's "it warbled when I tilted my head" is a physically plausible
-    /// stream of samples or a stream with steps in it. `clampedFrames` says how often
-    /// the limit above had to intervene, which is the same question asked of the
-    /// output: zero means the input was clean and the artefact is somewhere else
-    /// entirely.
-    /// One number, not three, and that is the point of the 1.4.1 fix: the per-axis
-    /// rates it used to report were a property of the Euler chart rather than of the
-    /// head, and on the hike that produced this instrumentation they read 8352°/s
-    /// while the head was moving normally. This is the geodesic rate, so a reading
-    /// above a few hundred now means what it always claimed to: the stream itself has
-    /// a step in it.
-    public private(set) var peakRate: Double = 0
-    public private(set) var clampedFrames = 0
-
-    /// How far the gaze has left the reference horizon, and whether the sample stream
-    /// went quiet — the two numbers the 08-13 report needs and the log did not have.
-    ///
-    /// The report is *an angle*: "I can most reliably reproduce this by looking all
-    /// the way down towards my feet." Nothing in the log was a function of where the
-    /// head was pointing, so a session with the symptom in it and a session without
-    /// were indistinguishable — the one correlation the listener handed us was the one
-    /// thing that could not be checked.
-    ///
-    /// `stalls` is the other half, and it is the hypothesis this instrumentation
-    /// exists to test. Three offline harnesses have now cleared the render path
-    /// (`Tools/warble`, `Tools/pole`, and the vector round-trip through the node), so
-    /// what is left is the sample stream itself — and a *stall* in it is invisible in
-    /// everything logged so far. `motion 1500/30s` is an aggregate: half a second of
-    /// silence from the AirPods costs 25 samples out of 1500 and reads as 1475, which
-    /// is indistinguishable from noise. But it is not inaudible. The field freezes for
-    /// the length of the stall, then the smoother slews to catch up at up to 400°/s —
-    /// which is precisely the half-second warble the slew limit was found producing
-    /// once already, from a different cause.
-    ///
-    /// And it fits the gesture in a way no amount of mathematics does: the motion
-    /// stream is a Bluetooth stream, separate from the audio one, between AirPods and
-    /// a phone in a trouser pocket. Looking all the way down puts a chin, a chest and
-    /// a torso across that path. This does not prove that is the cause; it makes the
-    /// next walk able to say so, by recording the largest gap between samples and the
-    /// tilt the head was at when it happened.
-    ///
-    /// **It said so, and the answer was no (08-15).** 32 stalls across 56 minutes,
-    /// and `tiltAtStall` is −18°…+15° every one of them — ordinary head angles, not
-    /// the extremes. Windows with *more* tilt movement had if anything *fewer*
-    /// stalls (0.20 per 30 s against 0.39). So the chin-across-the-path story is
-    /// dead: stalls are real, but they are not a function of where the head is.
-    ///
-    /// The instrumentation still earned its keep, because it caught something else
-    /// entirely — the stalls were being *mishandled* when they arrived, by a slew
-    /// limit that scaled with the gap and so could never fire on one. See
-    /// `HeadSmoother.maxCatchUpInterval`. That is fixed, and it is a real defect,
-    /// but nothing in this log ties it to the tilt gesture either.
-    ///
-    /// What is left after 08-15: the render path is exonerated four times over
-    /// (`Tools/warble`, `Tools/pole`, the vector round-trip, and now a level trace
-    /// that is flat against gaze angle), reference drift is fixed and measured
-    /// bounded, and iOS double-spatialisation — long carried as the outstanding
-    /// confounder — was never observable in the first place and was in fact switched
-    /// off by the listener throughout. The app's own output is clean at every mark.
-    /// The next thing to separate is whether the artifact survives with *our* head
-    /// tracking disabled, which is the one A/B nothing here has run.
-    public private(set) var peakTilt: Double = 0
-    public private(set) var stalls = 0
-    public private(set) var longestStall: Double = 0
-    public private(set) var tiltAtStall: Double = 0
-
-    /// Anything longer than this between samples is a stall rather than jitter.
-    /// AirPods Pro 2 deliver 50 Hz — 20 ms — so this is twelve missed samples, well
-    /// clear of ordinary scheduling slop and short enough to catch a freeze the ear
-    /// would notice.
-    public static let stallThreshold = 0.25
-
-    /// Where the gaze spent the window, not merely how far it got.
-    ///
-    /// `peakTilt` alone produced the 08-13 anomaly and could not explain it: the most
-    /// extreme value in each thirty-second window, and across a twelve-minute walk
-    /// those extremes spanned about 179° — more elevation than a neck has. But one
-    /// extreme per window cannot say whether the head briefly reached that angle or
-    /// sat there, and those are different faults. A histogram answers it for the cost
-    /// of an array increment per sample, with no allocation on the motion callback.
-    ///
-    /// Five-degree buckets over the whole sphere of possible gaze. Coarse on purpose:
-    /// this is being read by eye out of a log line.
-    public struct TiltHistogram {
-        static let buckets = 36
-        static let width = 5.0
-        private var counts = [Int](repeating: 0, count: buckets)
-        private(set) var lowest = 0.0
-        private(set) var highest = 0.0
-        private var total = 0
-
-        mutating func add(_ degrees: Double) {
-            if total == 0 { lowest = degrees; highest = degrees }
-            lowest = min(lowest, degrees)
-            highest = max(highest, degrees)
-            let i = min(Self.buckets - 1, max(0, Int((degrees + 90) / Self.width)))
-            counts[i] += 1
-            total += 1
-        }
-
-        /// Bucket centre at the halfway point. Approximate by construction and that is
-        /// fine — the question is "was the head mostly level or mostly craned", which
-        /// five degrees answers.
-        var median: Double {
-            guard total > 0 else { return 0 }
-            var seen = 0
-            for (i, c) in counts.enumerated() {
-                seen += c
-                if seen >= total / 2 { return -90 + (Double(i) + 0.5) * Self.width }
-            }
-            return 0
-        }
-
-        var isEmpty: Bool { total == 0 }
-        mutating func reset() {
-            counts = [Int](repeating: 0, count: Self.buckets)
-            lowest = 0; highest = 0; total = 0
-        }
-    }
-
-    /// The gaze as the *field* sees it — what the smoother is actually pointing the
-    /// node at. This is the number that spanned 179° under the old full-attitude
-    /// reference, and that sat at +76° against a +26° head on 08-21.
-    public private(set) var tiltSpread = TiltHistogram()
-    /// The gaze as the *sensor* reports it, absolutely — gravity-referenced, so a
-    /// neck bounds it to roughly ±70°.
-    ///
-    /// This pair was built as a discriminator between reference drift and sensor
-    /// fault, and it twice named the culprit. Under the 08-21 design its job
-    /// inverts: elevation is now *taken from* the raw figure (a heading twist cannot
-    /// move tilt), so the two histograms should agree to within smoothing lag, and
-    /// any future walk on which they part company again means an error has found a
-    /// new path onto the elevation axis.
-    public private(set) var rawSpread = TiltHistogram()
-    /// The most recent raw gaze elevation, for instrumentation that samples rather
-    /// than aggregates — see `MarkBuffer`.
-    public private(set) var rawTilt: Double = 0
-
-    public struct Diagnostics {
-        public var peak: Double
-        public var clamped: Int
-        public var peakTilt: Double
-        public var stalls: Int
-        public var longestStall: Double
-        public var tiltAtStall: Double
-        public var tilt: TiltHistogram
-        public var raw: TiltHistogram
-    }
-
-    public func drainDiagnostics() -> Diagnostics {
-        defer {
-            peakRate = 0; clampedFrames = 0
-            peakTilt = 0; stalls = 0; longestStall = 0; tiltAtStall = 0
-            tiltSpread.reset(); rawSpread.reset()
-        }
-        return Diagnostics(peak: peakRate, clamped: clampedFrames, peakTilt: peakTilt,
-                           stalls: stalls, longestStall: longestStall,
-                           tiltAtStall: tiltAtStall, tilt: tiltSpread, raw: rawSpread)
-    }
-
-    /// Gaze elevation above the reference horizon, in degrees.
-    ///
-    /// Read off the forward vector rather than the Euler readout, which is degenerate
-    /// at exactly the angles this is here to measure. `asin(forward.y)` is
-    /// well-conditioned everywhere on the sphere — ±90° is an honest value for it,
-    /// and it is yaw and roll that stop being separable there, neither of which this
-    /// needs.
-    private static func tilt(_ head: HeadOrientation) -> Double {
-        asin(max(-1, min(1, Double(head.orientation.forward.y)))) * 180 / .pi
-    }
+    private let motionQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "com.jeffhobbs.thrum.head-motion"
+        q.maxConcurrentOperationCount = 1
+        q.qualityOfService = .userInteractive
+        return q
+    }()
+    private let transport = OSAllocatedUnfairLock(initialState: HeadTransport())
+    /// One count per render cycle. Signalled from the render thread, drained by the
+    /// pacer. A `DispatchSemaphore` signal with no waiter is an atomic increment and
+    /// with one is a single mach trap; either is fine on the audio thread, and it is
+    /// what Apple's own audio→worker hand-offs use.
+    private let cycle = DispatchSemaphore(value: 0)
+    /// Which pacer is current. Bumped by `stop()`; a pacer that finds itself
+    /// superseded exits, so a quick stop/start cannot leave two running.
+    private let generation = OSAllocatedUnfairLock(initialState: 0)
+    private var lastPublish: TimeInterval = 0
 
     public init() {
         refreshStatus()
@@ -722,22 +771,28 @@ public final class HeadTracker: ObservableObject {
         }
     }
 
+    // MARK: Lifecycle
+
     public func start() {
         guard manager.isDeviceMotionAvailable else { status = .unsupported; return }
         guard !manager.isDeviceMotionActive else { return }
-        manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                if error != nil {
-                    self.status = CMHeadphoneMotionManager.authorizationStatus() == .denied
-                        ? .denied : .idle
-                    return
-                }
-                guard let motion else { return }
-                self.ingest(motion.attitude,
-                            gravity: simd_double3(motion.gravity.x, motion.gravity.y,
-                                                  motion.gravity.z),
-                            at: motion.timestamp)
+        transport.withLock { $0.recenter() }
+        startPacer()
+        manager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
+            guard let self else { return }
+            if error != nil {
+                let denied = CMHeadphoneMotionManager.authorizationStatus() == .denied
+                DispatchQueue.main.async { self.status = denied ? .denied : .idle }
+                return
+            }
+            guard let motion else { return }
+            let q = motion.attitude.quaternion
+            let g = motion.gravity
+            // `quaternion`, not `yaw`/`pitch`/`roll` — see `HeadMath`.
+            self.transport.withLock {
+                $0.ingest(attitude: simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w),
+                          gravity: simd_double3(g.x, g.y, g.z),
+                          at: motion.timestamp)
             }
         }
         status = .tracking
@@ -745,125 +800,77 @@ public final class HeadTracker: ObservableObject {
 
     public func stop() {
         manager.stopDeviceMotionUpdates()
-        needsHeading = true
-        leak = HeadSmoother.identity
-        smoothed = .identity
-        smoother = HeadSmoother()
-        // Or the next sample's dt is however long the AirPods were out of the ear,
-        // which would let the slew limit through in one enormous step — the exact
-        // thing it is there to catch.
-        lastSample = nil
+        stopPacer()
+        transport.withLock { $0.reset() }
         yaw = 0; pitch = 0; roll = 0
-        // Deliberately *not* pushing the identity orientation out.
-        //
-        // That snapped the listener back to dead ahead the instant tracking stopped,
-        // which is a hard rotation of the whole field — every source jumping at once
-        // — and tracking stops for reasons that have nothing to do with the listener
-        // wanting that: a route change, a pause, a moment of Bluetooth. Leaving the
-        // orientation where it was means a head-locked field simply stays where it
-        // is, which is what "stopped following your head" should sound like. The
-        // host sets a fresh orientation as soon as motion resumes.
+        // Deliberately *not* pushing the identity orientation out — see
+        // `HeadTransport.reset`. The host sets a fresh orientation as soon as motion
+        // resumes.
         refreshStatus()
     }
 
-    /// Take the current head position as "facing forward". AirPods yaw drifts,
-    /// so this is not a nicety — it is how the field gets put back in front of
-    /// you, and it wants to be one obvious button.
-    ///
-    /// Only the heading is re-seated — elevation comes from gravity and was never
-    /// wrong, so the button has nothing to say about it. The field glides in from
-    /// dead ahead and settles at the head's true tilt.
+    /// Take the current heading as "facing forward". AirPods yaw drifts, so this is
+    /// not a nicety — it is how the field gets put back in front of you, and it
+    /// wants to be one obvious button. The snap happens on the next tick.
     public func recenter() {
-        needsHeading = true
-        leak = HeadSmoother.identity
-        smoothed = .identity
-        smoother = HeadSmoother()
-        // Or the next sample's dt is however long the AirPods were out of the ear,
-        // which would let the slew limit through in one enormous step — the exact
-        // thing it is there to catch.
-        lastSample = nil
-        onOrientation?(.identity)
+        transport.withLock { $0.recenter() }
     }
 
-    private func ingest(_ attitude: CMAttitude, gravity: simd_double3,
-                        at timestamp: TimeInterval) {
-        // `quaternion`, not `yaw`/`pitch`/`roll`. Reading the Euler angles here is
-        // what put a 168° step into a stream whose underlying rotation never moved
-        // faster than a walk — see `HeadSmoother`. The quaternion has no chart and so
-        // no singularity to fall into.
-        let q = attitude.quaternion
-        let att = simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w)
+    /// Diagnostics, read by the host's flight recorder and reset by the reading.
+    public func drainDiagnostics() -> Diagnostics {
+        transport.withLock { $0.drainDiagnostics() }
+    }
 
-        // The world's vertical, as the sensor itself measures it this sample.
-        // Gravity arrives in the device frame; carried through the attitude it is
-        // the vertical of the frame the attitude lives in — so the twist axis rests
-        // on a measurement, not on the reference-frame contract. The fallback is
-        // that contract (headphone attitude is z-vertical), for the odd sample
-        // where gravity hasn't settled.
-        let up = simd_length(gravity) > 0.1
-            ? -simd_normalize(att.act(gravity))
-            : simd_double3(0, 0, 1)
+    /// The most recent raw gaze elevation, for instrumentation that samples rather
+    /// than aggregates.
+    public var rawTilt: Double {
+        transport.withLock { $0.diagnostics.rawTilt }
+    }
 
-        // Seed the heading from the head's own twist — pitch and roll never enter,
-        // so there is nothing here for a looking-down-at-the-phone start to bias.
-        if needsHeading {
-            leak = HeadSmoother.twist(att, about: up)
-            needsHeading = false
-        }
+    // MARK: Pacing
 
-        let dt = lastSample.map { max(timestamp - $0, 0.001) } ?? 0.04
-        // Before the smoother, and against the *previous* tilt: the interesting
-        // number is where the head was when the stream went quiet, not where it had
-        // got to by the time it came back.
-        if lastSample != nil, dt > Self.stallThreshold {
-            stalls += 1
-            if dt > longestStall {
-                longestStall = dt
-                tiltAtStall = Self.tilt(smoothed)
+    /// One render cycle has begun. Safe to call from the render thread.
+    public func tick() {
+        cycle.signal()
+    }
+
+    private func startPacer() {
+        let mine = generation.withLock { $0 += 1; return $0 }
+        let thread = Thread { [self] in self.pace(generation: mine) }
+        thread.name = "com.jeffhobbs.thrum.head-pacer"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+    }
+
+    private func stopPacer() {
+        generation.withLock { $0 += 1 }
+        cycle.signal()
+    }
+
+    private func pace(generation mine: Int) {
+        // Ticks that arrived while nobody was pacing — an hour of spatial rendering
+        // with tracking off is 180,000 of them — are not cycles to catch up on.
+        while cycle.wait(timeout: .now()) == .success {}
+        while generation.withLock({ $0 }) == mine {
+            _ = cycle.wait(timeout: .now() + .milliseconds(Int(Self.fallbackInterval * 1000)))
+            // A burst is one tick. Seventeen source nodes share one cycle and the pump
+            // already collapses them, but nothing here should depend on that.
+            while cycle.wait(timeout: .now()) == .success {}
+            guard generation.withLock({ $0 }) == mine else { return }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            guard let out = transport.withLock({ $0.advance(to: now) }) else { continue }
+            // Rotating the *listener* with the head is what leaves the sources
+            // standing still in the room.
+            onOrientation?(out)
+
+            if now - lastPublish > 0.1 {
+                lastPublish = now
+                DispatchQueue.main.async { [self] in
+                    yaw = out.yaw; pitch = out.pitch; roll = out.roll
+                    if status != .tracking, manager.isDeviceMotionActive { status = .tracking }
+                }
             }
-        }
-        lastSample = timestamp
-
-        // Divide the heading out on the left — a rotation in the world frame, where
-        // the vertical lives — and hand the smoother what is left: the head's true
-        // gravity swing, plus its yaw relative to the leaky heading. A nod is a pure
-        // pitch of this quantity at any heading, and nothing that happens on the yaw
-        // axis — a sensor re-seat, a held turn — can reach its elevation, because
-        // `leak` is a twist about the very axis elevation is measured from.
-        let corrected = leak.conjugate * att
-
-        // Then drain the heading toward the head's current twist. `elevation: .infinity`
-        // is the 08-21 design, not a placeholder: the swing is absolute now, so there
-        // is no elevation drift to drain and the leak must never acquire a component
-        // off the vertical.
-        leak = HeadSmoother.leaked(leak, toward: att, up: up, dt: dt,
-                                   elevation: .infinity, yaw: Self.yawLeak)
-
-        let out = smoother.step(rotation: corrected, dt: dt)
-        smoothed = out.head
-        peakRate = max(peakRate, out.rate)
-        if out.clamped { clampedFrames += 1 }
-        let tilt = Self.tilt(smoothed)
-        if abs(tilt) > abs(peakTilt) { peakTilt = tilt }
-        tiltSpread.add(tilt)
-        // The same measurement on the unreferenced attitude, through the same frame
-        // change, so the two numbers are directly comparable. Under the 08-21 design
-        // they *should* now agree to within smoothing lag — the heading is a twist and
-        // twists cannot move tilt — so these diverging on a future walk is the alarm
-        // that something has crept back onto the wrong axis.
-        rawTilt = Self.tilt(HeadOrientation(
-            orientation: HeadSmoother.listener(att), yaw: 0, pitch: 0, roll: 0))
-        rawSpread.add(rawTilt)
-
-        // Rotating the *listener* with the head is what leaves the sources
-        // standing still in the room.
-        onOrientation?(smoothed)
-
-        let now = Date()
-        if now.timeIntervalSince(lastPublish) > 0.1 {
-            lastPublish = now
-            yaw = smoothed.yaw; pitch = smoothed.pitch; roll = smoothed.roll
-            if status != .tracking { status = .tracking }
         }
     }
 }

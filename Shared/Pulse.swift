@@ -1,4 +1,7 @@
 import Foundation
+#if os(macOS)
+import Ensemble
+#endif
 
 /// Thrum's pulse: a tempo, and up to four arpeggiators running over the drone
 /// at the same time.
@@ -322,6 +325,23 @@ public final class PulseCore: @unchecked Sendable {
     private var beat = 0.0
     private var lastTick = 0.0
     private var taps: [Double] = []
+#if os(macOS)
+    /// The ensemble's grid, when this app is following one.
+    ///
+    /// Following means the beat is *read* rather than integrated. Matching a
+    /// leader's tempo but keeping your own count is not being in time with it —
+    /// the two agree about how fast the beats go by and disagree, permanently
+    /// and by however much they were out when they started, about where they
+    /// fall. Reading the leader's grid puts every lane's step zero on the
+    /// leader's beat, which is what makes an arpeggio sit on a kick drum
+    /// instead of near it.
+    private var ensembleClock: EnsembleClock?
+    /// Where this app's beat zero sits on that grid, and the handling for the
+    /// leader's count moving under us. Lane phases are offsets into a bar from a
+    /// downbeat, so the count has to start at zero when everybody lines up
+    /// rather than at whatever the leader's absolute count happens to be.
+    private var follower = EnsembleFollower()
+#endif
 
     /// Written from the pulse queue, read from the UI at animation rate. Same
     /// benign race as the engine's meters — a stale frame costs nothing.
@@ -371,6 +391,16 @@ public final class PulseCore: @unchecked Sendable {
         queue.async { self.bpm = min(240, max(20, v)) }
     }
 
+#if os(macOS)
+    /// Follow a shared grid, or nil to go back to keeping time alone.
+    public func follow(_ clock: EnsembleClock?) {
+        queue.async {
+            self.ensembleClock = clock
+            self.realignLocked(at: Self.now())
+        }
+    }
+#endif
+
     public func setFeel(swing: Double, humanize: Double, level: Double) {
         queue.async {
             self.swing = min(0.7, max(0, swing))
@@ -417,6 +447,14 @@ public final class PulseCore: @unchecked Sendable {
         lastTick = t
         displayBeat = 0
         for i in nextStep.indices { nextStep[i] = 0 }
+#if os(macOS)
+        // Beat zero is *here* on the shared grid — including, when the leader
+        // says how long its bar is, on the downbeat it is heading for rather
+        // than wherever inside the bar the gesture happened to land.
+        if let grid = ensembleClock?.followedTempo {
+            follower.rejoin(grid, now: t)
+        }
+#endif
     }
 
     public func stop() {
@@ -450,7 +488,23 @@ public final class PulseCore: @unchecked Sendable {
         let dt = min(0.25, max(0, t - lastTick))
         lastTick = t
         guard running else { return }
+#if os(macOS)
+        if let grid = ensembleClock?.followedTempo {
+            bpm = min(240, max(20, grid.bpm))
+            let read = follower.position(on: grid, now: t)
+            beat = read.beat
+            // The leader restarted, or somebody else took the tempo. Its count
+            // means something different now, so the lanes start their figures
+            // again rather than resuming eight hundred steps in.
+            if read.jumped {
+                for i in nextStep.indices { nextStep[i] = 0 }
+            }
+        } else {
+            beat += dt * bpm / 60.0
+        }
+#else
         beat += dt * bpm / 60.0
+#endif
         displayBeat = beat
 
         for i in lanes.indices {

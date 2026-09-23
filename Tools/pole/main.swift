@@ -264,7 +264,7 @@ func symptoms(_ rows: [[Float]]) -> [Symptom] {
 /// change in `HeadSmoother.toListener` → the vectors the node is driven with.
 func orientation(yaw: Double = 0, pitch: Double = 0, roll: Double = 0)
         -> AVAudio3DVectorOrientation {
-    HeadSmoother.listener(HeadSmoother.rotation(yaw: yaw, pitch: pitch, roll: roll))
+    HeadMath.listener(HeadMath.rotation(yaw: yaw, pitch: pitch, roll: roll))
 }
 
 /// A head tilt at a realistic rate. 100° over six seconds is ~17°/s, which is a

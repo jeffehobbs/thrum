@@ -10,6 +10,26 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.9"
 packages:
+  # The lock screen and the car, shared by all five Phonotropic apps.
+  Dashboard:
+    path: ../dashboard
+  # The pulse, on the phone. Developed alongside Meter and meant for the other
+  # iOS apps — hence a package on disk rather than a folder in here. iOS only:
+  # HealthKit and CMPedometer do not exist on the Mac, and the Mac app is an
+  # instrument somebody is playing, which already has a tempo.
+  Cadence:
+    path: ../cadence
+  # The link to Meter and Echo: one tempo, one key, one downbeat across three
+  # separate apps running side by side. macOS only — it rests on every
+  # participant reading the same mach uptime clock and on a cross-process
+  # notification, neither of which means anything on the phone, and ThrumFlow
+  # is a thing you leave playing with nothing beside it anyway.
+  Ensemble:
+    path: ../ensemble
+  # Six consumable tips, unlocking nothing — shared with Field, Meter and
+  # Plasma. iOS only: the Mac app has never had a tip jar.
+  TipJar:
+    path: ../tipjar
   # Sparkle ships an XCFramework as its SPM product; the command-line tools
   # (generate_keys, generate_appcast, sign_update) are NOT in the package and
   # come from the release tarball instead — build.sh fetches them on demand.
@@ -27,6 +47,7 @@ targets:
         optional: true
     dependencies:
       - package: Sparkle
+      - package: Ensemble
     info:
       path: App/Info.plist
       properties:
@@ -88,6 +109,10 @@ targets:
     sources:
       - iOS
       - Shared
+    dependencies:
+      - package: Cadence
+      - package: TipJar
+      - package: Dashboard
     info:
       path: iOS/Info.plist
       properties:
@@ -99,7 +124,17 @@ targets:
         # drone stops the moment the phone locks, which is when a passive
         # ambient app is most likely to be wanted.
         UIBackgroundModes: [audio]
-        NSMotionUsageDescription: Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head. Nothing is recorded or sent anywhere.
+        # Two features behind one string, and it has to name both or it explains
+        # neither: the same CoreMotion permission covers AirPods orientation (the
+        # spatial field) and the pedometer (the pulse estimate).
+        NSMotionUsageDescription: Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head, and — if you ask it to follow your pulse — your movement, so it can estimate your heart rate. Nothing is recorded or sent anywhere.
+        NSHealthShareUsageDescription: Thrum reads your heart rate and resting heart rate so the drone's pulse can beat with yours, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.
+        # Required even though this app never writes to Health, and the App Store
+        # rejects the build without it (ITMS-90683): the check is on the
+        # *entitlement*, which permits writing, not on whether any write exists in
+        # the code. The string still has to be true and user-facing, so it says
+        # what actually happens.
+        NSHealthUpdateUsageDescription: Thrum does not save anything to Health. It only reads your heart rate, so the tempo can follow your pulse — nothing is ever written back.
         UILaunchScreen:
           UIColorName: ""
         # Every orientation on both idioms — this is a thing you prop up and
@@ -133,24 +168,47 @@ targets:
             UIWindowSceneSessionRoleApplication:
               - UISceneConfigurationName: Default Configuration
             CPTemplateApplicationSceneSessionRoleApplication:
+              # The delegate lives in the Dashboard package, so it is named by
+              # its explicit Objective-C name rather than
+              # $(PRODUCT_MODULE_NAME) — the class is not in this module.
               - UISceneConfigurationName: Thrum CarPlay
                 UISceneClassName: CPTemplateApplicationScene
-                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
+                UISceneDelegateClassName: DashboardCarPlaySceneDelegate
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrumflow
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # HealthKit and the shared App Group, and — by default — CarPlay. Set here
+        # rather than only at archive time, which is where the CarPlay entitlement
+        # used to live alone: HealthKit has to be in *every* build or a device run
+        # from Xcode silently cannot read a heart rate, which looks exactly like the
+        # estimate being bad. `CARPLAY=0 ./build.sh testflight` swaps in
+        # ThrumFlow-NoCarPlay.entitlements, which is this file minus that one key.
+        CODE_SIGN_ENTITLEMENTS: iOS/ThrumFlow.entitlements
         # 1 = iPhone, 2 = iPad. Both, and the layout is centred and unconstrained
         # so there is nothing idiom-specific to maintain.
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
-        MARKETING_VERSION: "1.0.1"
-        # Uploaded to TestFlight so far: 1 on 2026-08-08, 3 on 2026-08-10 (the head
-        # tracking wrap/slew fix and the thumbs layout).
+        MARKETING_VERSION: "1.2.0"
+        # Uploaded to TestFlight so far, checked against App Store Connect rather
+        # than remembered:
         #
-        # 1.0.1 carries the real fix for the warble those earlier builds were chasing:
-        # the head-tracking transport now smooths a quaternion instead of three Euler
-        # angles. See `HeadSmoother`.
+        #   1.0.0  build 1   2026-08-08
+        #   1.0.0  build 2   2026-08-09
+        #   1.0.0  build 3   2026-08-10   head-tracking wrap/slew fix, thumbs layout
+        #   1.0.1  build 9   2026-08-14   the real warble fix — the head-tracking
+        #                                 transport smooths a quaternion instead of
+        #                                 three Euler angles. See `HeadSmoother`.
+        #   1.1.0  build ?   2026-09-08   follow-my-pulse (Cadence) and the head-
+        #                                 tracking switch, both behind the gear
+        #
+        # This list was wrong for three weeks — it claimed 1 and 3 while 9 was live —
+        # which is what a hand-kept record does. `asc.py` answers the question in one
+        # call, so check before editing:
+        #
+        #   cd ~/.appstoreconnect && python3 -c "import asc; \
+        #     print([(d['attributes']['version'], d['attributes']['uploadedDate'][:10]) \
+        #            for d in asc.request('/v1/builds?filter[app]=6799441904&limit=10&sort=-uploadedDate')['data']])"
         #
         # App Store Connect rejects a build number it has already seen, so this goes
         # up before the next build rather than after a failure. It is not the last
@@ -159,7 +217,7 @@ targets:
         # has seen and bumps past it at export time — which is how an archive of 2
         # became build 3. Keep this current anyway; it is the only record in the repo
         # of what has actually shipped.
-        CURRENT_PROJECT_VERSION: "12"
+        CURRENT_PROJECT_VERSION: "15"
         # Metal shaders are compiled from iOS/Shaders.metal by the default build
         # rule; -O keeps the fragment loop tight, which matters at 5 M pixels.
         MTL_ENABLE_DEBUG_INFO: NO

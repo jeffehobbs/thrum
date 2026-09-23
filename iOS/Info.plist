@@ -24,8 +24,12 @@
 	<false/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Thrum reads your heart rate and resting heart rate so the drone's pulse can beat with yours, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Thrum does not save anything to Health. It only reads your heart rate, so the tempo can follow your pulse — nothing is ever written back.</string>
 	<key>NSMotionUsageDescription</key>
-	<string>Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head. Nothing is recorded or sent anywhere.</string>
+	<string>Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head, and — if you ask it to follow your pulse — your movement, so it can estimate your heart rate. Nothing is recorded or sent anywhere.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -40,7 +44,7 @@
 					<key>UISceneConfigurationName</key>
 					<string>Thrum CarPlay</string>
 					<key>UISceneDelegateClassName</key>
-					<string>$(PRODUCT_MODULE_NAME).CarPlaySceneDelegate</string>
+					<string>DashboardCarPlaySceneDelegate</string>
 				</dict>
 			</array>
 			<key>UIWindowSceneSessionRoleApplication</key>

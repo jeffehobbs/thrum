@@ -19,10 +19,12 @@ class MIDISurface {
     private(set) var source: MIDIEndpointRef = 0
     private(set) var dest: MIDIEndpointRef = 0
 
-    /// The substring we search for.
-    let deviceName: String
-    /// The full display name of whatever actually connected — "Launch Control XL"
-    /// and "Launch Control" need different CC maps, and only this can tell them apart.
+    /// The substrings we search for. A device family needs several: Novation
+    /// names the Launch Control XL 3's ports "LCXL3 1 MIDI Out", nothing like
+    /// the "Launch Control XL" its older siblings report.
+    let deviceNames: [String]
+    /// The full display name of whatever actually connected — the generations
+    /// need different CC maps, and only this can tell them apart.
     private(set) var connectedName: String = ""
     private let portHint: String?
     private let onMessage: ([Message]) -> Void
@@ -30,10 +32,10 @@ class MIDISurface {
 
     var isConnected: Bool { source != 0 && dest != 0 }
 
-    init(clientName: String, deviceName: String, portHint: String? = nil,
+    init(clientName: String, deviceNames: [String], portHint: String? = nil,
          onConnect: @escaping (Bool) -> Void,
          onMessage: @escaping ([Message]) -> Void) {
-        self.deviceName = deviceName
+        self.deviceNames = deviceNames
         self.portHint = portHint
         self.onMessage = onMessage
         self.onConnect = onConnect
@@ -56,16 +58,8 @@ class MIDISurface {
     func willDisconnect() {}
 
     func scan() {
-        var foundSource: MIDIEndpointRef = 0
-        var foundDest: MIDIEndpointRef = 0
-        for i in 0..<MIDIGetNumberOfSources() {
-            let ep = MIDIGetSource(i)
-            if matches(ep) { foundSource = ep; break }
-        }
-        for i in 0..<MIDIGetNumberOfDestinations() {
-            let ep = MIDIGetDestination(i)
-            if matches(ep) { foundDest = ep; break }
-        }
+        let foundSource = pick((0..<MIDIGetNumberOfSources()).map(MIDIGetSource))
+        let foundDest = pick((0..<MIDIGetNumberOfDestinations()).map(MIDIGetDestination))
         guard foundSource != source || foundDest != dest else { return }
         if source != 0 {
             willDisconnect()
@@ -78,7 +72,7 @@ class MIDISurface {
             onConnect(false)
             return
         }
-        connectedName = Self.displayName(source) ?? deviceName
+        connectedName = Self.displayName(source) ?? deviceNames[0]
         MIDIPortConnectSource(inPort, source, nil)
         onConnect(true)
         didConnect()
@@ -90,13 +84,22 @@ class MIDISurface {
         return unmanaged?.takeRetainedValue() as String?
     }
 
-    private func matches(_ ep: MIDIEndpointRef) -> Bool {
-        guard let name = Self.displayName(ep) else { return false }
-        guard name.localizedCaseInsensitiveContains(deviceName) else { return false }
-        // The Launchpad X exposes both a DAW and a MIDI port pair; programmer
-        // mode traffic lives on the one named "…MIDI".
-        if let hint = portHint { return name.localizedCaseInsensitiveContains(hint) }
-        return true
+    /// The best endpoint of the ones attached, or 0 for none of them.
+    ///
+    /// The port hint is a preference, not a requirement: the Launchpad X and the
+    /// Launch Control XL 3 both expose a DAW pair alongside the MIDI pair we
+    /// want, but the older Launch Controls expose one unsuffixed pair, and
+    /// insisting on the hint would leave those unfindable.
+    private func pick(_ endpoints: [MIDIEndpointRef]) -> MIDIEndpointRef {
+        var fallback: MIDIEndpointRef = 0
+        for ep in endpoints {
+            guard let name = Self.displayName(ep) else { continue }
+            guard deviceNames.contains(where: { name.localizedCaseInsensitiveContains($0) }) else { continue }
+            guard let hint = portHint else { return ep }
+            if name.localizedCaseInsensitiveContains(hint) { return ep }
+            if fallback == 0 { fallback = ep }
+        }
+        return fallback
     }
 
     func send(_ bytes: [UInt8]) {

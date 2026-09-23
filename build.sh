@@ -295,9 +295,17 @@ if [[ "$MODE" == "testflight" ]]; then
   # advice throws away working CarPlay support. The thing to check is that the
   # capability is still enabled on the App ID and that the profile has been
   # regenerated — not the spelling.
+  #
+  # The entitlements file is now named in project.yml as well, because HealthKit
+  # and the shared App Group live in it too and those have to be in *every* build,
+  # not only in an archive — a device run from Xcode without them cannot read a
+  # heart rate, and the symptom is an estimate that never improves rather than an
+  # error. So the default needs no override here; CARPLAY=0 swaps in the file that
+  # is the same minus that one key.
   CARPLAY_ARGS=()
   if [[ "$CARPLAY" == "0" ]]; then
     echo "▸ CarPlay entitlement withheld (CARPLAY=0) — the car will not see this build."
+    CARPLAY_ARGS=(CODE_SIGN_ENTITLEMENTS=iOS/ThrumFlow-NoCarPlay.entitlements)
   else
     echo "▸ CarPlay entitlement attached."
     CARPLAY_ARGS=(CODE_SIGN_ENTITLEMENTS=iOS/ThrumFlow.entitlements)
@@ -455,6 +463,19 @@ ARCHS_BUILT=$(lipo -archs "$APP/Contents/MacOS/Thrum" | tr ' ' '\n' | sort | tr 
 if [[ "$ARCHS_BUILT" != "arm64 x86_64 " ]]; then
   echo "✗ expected a universal binary, got: $ARCHS_BUILT" >&2
   exit 1
+fi
+
+# An ad-hoc app can no longer load its embedded Sparkle on this OS (observed
+# 2026-08-21, macOS 26.6): dyld's library validation rejects the framework with
+# "different Team IDs" and the app dies at launch, every launch, from a clean
+# build. The note from 1.4.0 that ad-hoc "launches fine with an embedded
+# framework" stopped being true. So local builds get the same inside-out
+# Developer ID pass the notarize path uses — when the identity is present.
+# Without it, say so loudly rather than hand over an app that only crashes.
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$DEV_ID"; then
+  sign_inside_out "$APP"
+else
+  echo "  ⚠︎  No '$DEV_ID' identity — left ad-hoc, and ad-hoc cannot load Sparkle on macOS 26.6+: the app will crash at launch."
 fi
 
 echo "Built: $APP  ($CONFIG, universal: $ARCHS_BUILT)"

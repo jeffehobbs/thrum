@@ -1,5 +1,7 @@
 import SwiftUI
+import Dashboard
 import AVFoundation
+import Cadence
 import Accelerate
 import MediaPlayer
 import Combine
@@ -32,7 +34,9 @@ private let log = Logger(subsystem: "com.jeffhobbs.thrumflow", category: "audio"
 ///    biggest audio-side win available and it costs nothing perceptible.
 ///    *Asked for on every route, not just at launch* — the flight recorder caught
 ///    this claim being false on AirPods for the life of the app, which is the one
-///    route the spatial path exists for. See `requestLongBuffer`.
+///    route the spatial path exists for. **Except while head tracking**, where the
+///    render cycle is also the rate the field can turn at, and 85 ms is audibly
+///    too coarse — see `preferredBufferDuration`.
 /// 2. **Spatial only on headphones.** Not primarily for the 9%: binaural
 ///    rendering over a phone speaker is actively worse than stereo, for the same
 ///    reason the Mac app grew `AudioRoute`. Free on both counts.
@@ -88,6 +92,91 @@ final class FlowHost: ObservableObject {
 
     var targetFPS: Int { idle ? Self.idleFPS : Self.activeFPS }
 
+    // MARK: - Settings
+
+    /// The things behind the gear.
+    ///
+    /// All stored rather than derived. Pulse-following defaults off — a preference
+    /// screen that changes the app the moment it ships is a preference screen that
+    /// has made a decision on the listener's
+    /// behalf, and head tracking in particular reads a sensor continuously.
+    private enum Key {
+        static let followsPulse = "flow.followsPulse"
+        static let headTracking = "flow.headTracking"
+        static let sleepMinutes = "flow.sleepMinutes"
+    }
+
+    /// "Tempo follows user activity." Cadence's setting, persisted by Cadence;
+    /// these are the app's handles on it so the views bind through `host`.
+    /// On by default, like every Phonotropic app; the Health and Motion prompts
+    /// are asked on the first play, when a tempo that follows you starts to
+    /// matter. Off, the slider sets the tempo — Flow no longer drifts it.
+    var followsPulse: Bool {
+        get { cadence.followsActivity }
+        set { cadence.followsActivity = newValue }
+    }
+
+    /// The tempo when it does not follow. Cadence clamps and persists it.
+    var manualTempo: Double {
+        get { cadence.manualTempo }
+        set { cadence.manualTempo = newValue }
+    }
+
+    /// Whether the field is allowed to stay put while the listener's head turns.
+    ///
+    /// On by default: the head-tracked field is the whole point of the spatial
+    /// path — it is what makes the drone sit in the room rather than in the ears —
+    /// and every build before the switch existed tracked unconditionally. The
+    /// Motion prompt appears on first play with headphones, which is when the
+    /// answer means something. Turning it *off* is the real request: a listener
+    /// who wants the drone welded to their ears, on a train or lying down.
+    @Published var headTrackingEnabled: Bool {
+        didSet {
+            guard headTrackingEnabled != oldValue else { return }
+            UserDefaults.standard.set(headTrackingEnabled, forKey: Key.headTracking)
+            updateHeadTracking()
+        }
+    }
+
+    /// Minutes until the drone pauses on its own; zero means never.
+    ///
+    /// Persisted, so a sleep timer set on the way to bed survives a relaunch —
+    /// the same behaviour Plasma and Meter give theirs.
+    @Published var sleepMinutes: Int = UserDefaults.standard.integer(forKey: Key.sleepMinutes) {
+        didSet {
+            guard sleepMinutes != oldValue else { return }
+            UserDefaults.standard.set(sleepMinutes, forKey: Key.sleepMinutes)
+            armSleepTimer()
+        }
+    }
+    @Published private(set) var sleepRemaining: TimeInterval?
+
+    private var sleepTimer: Timer?
+    private var sleepUntil: Date?
+    private var sleepDisplayTicker: Timer?
+
+    /// Shared with the other Phonotropic apps.
+    ///
+    /// What Cadence learns is about the person, not about this app — their resting
+    /// rate, how their heart answers a hill — so Meter and Thrum are asking the same
+    /// question of the same body and there is no reason each should learn it from
+    /// scratch. Only the observations travel; the tempo mapping below stays private
+    /// to Thrum, because one app counting a heartbeat as a bar and another as a
+    /// quarter note must not share a range.
+    static let group = "group.com.jeffhobbs.phonotropic"
+    let cadence = Cadence(name: "thrum", group: FlowHost.group)
+
+    /// The window a pulse is folded into before it becomes a tempo.
+    ///
+    /// Cadence's own default is 62…148, which is a drum machine's range. Thrum's
+    /// pulse presets live between 48 and 108 and Flow roams 46…88, so this is one
+    /// octave centred on where a drone's arpeggios actually sit — and wide enough
+    /// that an ordinary day, resting to a brisk walk, never folds at all. Folding is
+    /// exact rather than approximate (a pulse of 120 becomes 60, which *is* that
+    /// pulse) but it is still an audible halving, and the fewer of them the better.
+    private static let foldLow = 52.0
+    private static let foldHigh = 104.0
+
     private let audio = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
     private let environment = AVAudioEnvironmentNode()
@@ -101,24 +190,18 @@ final class FlowHost: ObservableObject {
     private var artworkTimer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var harmonyWatch: AnyCancellable?
+    private var cadenceWatch: Set<AnyCancellable> = []
     private var fieldDirty = false
     /// Set only when an interruption is what paused us, so that when it ends we
     /// resume — and a pause the listener asked for stays paused.
     private var resumeWhenInterruptionEnds = false
 
-    /// Spatial-path bookkeeping — see `placeListener` and `applyField`.
-    private var listenerFacing = (forward: simd_float3(0, 0, -1), up: simd_float3(0, 1, 0))
-    private var lastListenerWrite: CFTimeInterval = 0
+    /// Spatial-path bookkeeping — see `ListenerSink` and `applyField`.
+    private var sink: ListenerSink?
     private var placedField = SpatialField()
     private var placedFieldValid = false
 
     /// Flight-recorder counters, sampled and reset by the heartbeat.
-    private var motionUpdates = 0
-    /// How many of those motion updates got past the dead band and the rate cap to
-    /// actually re-point sixteen HRTFs. Logged next to `motionUpdates` because the
-    /// ratio is the interesting part: a session where nearly every sample writes is a
-    /// session where the input is never still, which is not what a head does.
-    private var listenerWrites = 0
     private var lastOverruns: Int32 = 0
     private var heartbeat: Timer?
     private var fadeTimer: Timer?
@@ -134,6 +217,23 @@ final class FlowHost: ObservableObject {
     private let artScratch = [ShaderVoice](repeating: ShaderVoice(), count: 32)
 
     init() {
+        // Read before anything else touches `self`, because both are stored
+        // properties and Swift will not lend `self` out until they hold a value.
+        // `bool(forKey:)` answers false for a key that has never been written,
+        // which is the right default for the pulse. Head tracking defaults on, so
+        // it is read as "unset means on" rather than registered: a listener who
+        // has never touched the switch gets the field, and one who turned it off
+        // stays off.
+        let defaults = UserDefaults.standard
+        // The switch used to be saved here. It is Cadence's now, and carried
+        // over once: an app updated under a listener keeps doing what it was
+        // doing yesterday. A listener who never had the key gets the default, on.
+        if !cadence.hasStoredSettings, defaults.object(forKey: Key.followsPulse) != nil {
+            cadence.followsActivity = defaults.bool(forKey: Key.followsPulse)
+        }
+        headTrackingEnabled = defaults.object(forKey: Key.headTracking) == nil
+            ? true : defaults.bool(forKey: Key.headTracking)
+
         let session = AVAudioSession.sharedInstance()
         do {
             // .playback so it keeps going with the screen locked, and does not
@@ -141,8 +241,10 @@ final class FlowHost: ObservableObject {
             // passive drone. Not .mixWithOthers: a 30-second reverb tail layered
             // under someone's podcast is nobody's intention.
             try session.setCategory(.playback, mode: .default, options: [])
-            // Before `setActive`, which is when the session configures its IO.
-            Self.requestLongBuffer()
+            // Before `setActive`, which is when the session configures its IO. The
+            // route is not known yet, so this is the long buffer; `start()` asks
+            // again with the route in hand, before the engine starts.
+            Self.requestBuffer(Self.longBuffer)
             try session.setActive(true)
         } catch {
             // Non-fatal: the engine still runs at whatever the session gives us.
@@ -170,15 +272,24 @@ final class FlowHost: ObservableObject {
         // did. Half of "the spatial effect is very subtle" was that.
         model.onFieldChange = { [weak self] in self?.scheduleFieldUpdate() }
         model.route.onChange = { [weak self] in self?.routeChanged() }
-        model.head.onOrientation = { [weak self] head in
-            self?.placeListener(head)
-        }
+
+        // The tempo is Cadence's in both positions of the switch — the slider's
+        // when set by hand, the body's when following — so Flow never writes it.
+        // The lock goes up before the first value goes in.
+        model.tempoIsFollowed = true
+        adoptFoldWindow()
 
         buildGraph()
         watchSession()
-        configureRemoteCommands()
+        // The command table and the Now Playing dictionary live in Dashboard
+        // now, shared with Plasma, Meter, Field and Counter. Thrum's own
+        // mapping survives the move intact: ★ is a thumbs-up, ⏭ is "move on",
+        // which is a thumbs-down, and the car keeps its labelled 👎 beside it.
+        Dashboard.register(self)
         watchHarmony()
+        watchCadence()
         updateNowPlaying()
+        startSleepDisplayTicker()
     }
 
     /// Whether iOS is applying its **own** head-tracked spatialisation on top of ours.
@@ -219,37 +330,62 @@ final class FlowHost: ObservableObject {
         AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.isSpatialAudioEnabled }
     }
 
-    /// Ask for a long IO buffer — again, because asking once is not enough.
+    /// The IO buffer when nothing is turning the field: ~85 ms.
     ///
-    /// ~85 ms. Latency is worthless to this app and expensive to hold, so it is traded
+    /// Latency is worthless to this app and expensive to hold, so it is traded
     /// straight for fewer wakeups, and the doc comment at the top of this file rests
     /// on getting it. iOS treats the request as a hint, so what it granted is read
     /// back rather than assumed.
+    static let longBuffer = 0.085
+
+    /// The IO buffer while the head is being tracked: ~21 ms, 1024 frames at 48 kHz.
+    ///
+    /// The render cycle is now the clock the field turns on — `HeadTracker` hands the
+    /// environment node exactly one orientation per cycle — so the buffer length is
+    /// also the step size of every head movement: at a modest 100°/s a head moves
+    /// 8.5° between 85 ms cycles and 2° between 21 ms ones. `Tools/handover` measured
+    /// what that costs against the node itself, on a 63°/s look-around, sixteen
+    /// drones, high band (4–12 kHz) level wobble per 10 ms, HRTFHQ:
+    ///
+    ///     480 frames  0.040 dB     1024  0.055     2048  0.093     4096  0.094
+    ///
+    /// and the pitch of a 1760 Hz partial held to 2.0¢ worst-case at 480 and 1024
+    /// against 5.1¢ at 4096. 1024 is within a hair of 480 at half the wakeups, and
+    /// four times fewer wakeups than the 10 ms iOS was quietly granting AirPods
+    /// before anyone asked. Twelve wakeups a second is still the right number for a
+    /// head-locked field, which is why this is a choice and not a new constant.
+    static let trackingBuffer = 0.021
+
+    /// Which of the two this route and these settings want.
+    private var preferredBufferDuration: Double {
+        headTrackingEnabled && !model.route.isRoom ? Self.trackingBuffer : Self.longBuffer
+    }
+
+    /// Ask for the buffer this moment wants — again, because asking once is not
+    /// enough.
     ///
     /// It has to be re-asked on every route change, and that is the defect this was
     /// pulled out of `init` to fix. The preference was set once, at launch, when the
     /// route is whatever the phone was last using — and a preference set against one
-    /// route does not survive being moved to another. The flight recorder shows the
-    /// result plainly: every built-in-speaker session in the log reads
-    ///
-    ///     48 kHz · 4080 frames · 85 ms
-    ///
-    /// and every AirPods session reads
-    ///
-    ///     48 kHz · 480 frames · 10 ms
-    ///
-    /// So the one route the spatial path exists for is the one route that never got
-    /// the buffer, and the whole graph — engine plus sixteen HRTFs — has been running
-    /// at 100 wakeups a second instead of twelve. Whether iOS will grant 85 ms over
+    /// route does not survive being moved to another. The flight recorder showed the
+    /// result plainly: every built-in-speaker session read `4080 frames · 85 ms` and
+    /// every AirPods session `480 frames · 10 ms`. Whether iOS grants the request over
     /// Bluetooth at all is its decision and not ours; asking costs nothing, and the
     /// heartbeat reports what actually came back either way.
-    ///
+    private func requestBuffer() {
+        Self.requestBuffer(preferredBufferDuration)
+    }
+
     /// Static because it touches only the shared session, which lets `init` call it
     /// before the rest of `self` exists — and the one place the request is certain to
     /// be honoured is before the session is first activated.
-    private static func requestLongBuffer() {
+    private static func requestBuffer(_ seconds: Double) {
+        let session = AVAudioSession.sharedInstance()
+        // Idempotent, so this can be called from every place the answer might have
+        // changed without re-configuring IO for a request it has already granted.
+        guard abs(session.preferredIOBufferDuration - seconds) > 0.0005 else { return }
         do {
-            try AVAudioSession.sharedInstance().setPreferredIOBufferDuration(0.085)
+            try session.setPreferredIOBufferDuration(seconds)
         } catch {
             log.error("buffer request refused: \(error.localizedDescription, privacy: .public)")
         }
@@ -278,10 +414,17 @@ final class FlowHost: ObservableObject {
         // Built up front, exactly as on the Mac and for the same reason: attaching
         // seventeen nodes to a running engine is what glitches the render thread,
         // and the HRTF stage costs ~9% when idle. Switching modes is then a bool.
-        let pump = SpatialPump(engine: kernel)
+        let pump = SpatialPump(engine: kernel, head: model.head)
         self.pump = pump
         audio.attach(environment)
         audio.connect(environment, to: audio.mainMixerNode, format: stereo)
+
+        // The last hop of the head-tracking transport. Off the main thread — see
+        // `ListenerSink` — and wired here because it needs the node.
+        let sink = ListenerSink(environment: environment, head: model.head,
+                                dropoutWatch: dropoutWatch, markBuffer: markBuffer)
+        self.sink = sink
+        model.head.onOrientation = { sink.place($0) }
 
         for bus in 0..<DroneEngine.spatialBusCount {
             let busNode = AVAudioSourceNode(format: mono) { _, timestamp, frameCount, abl -> OSStatus in
@@ -298,7 +441,19 @@ final class FlowHost: ObservableObject {
             }
             audio.attach(busNode)
             audio.connect(busNode, to: environment, format: mono)
-            busNode.renderingAlgorithm = .HRTF
+            // HRTFHQ, not HRTF, and this is the single biggest thing in the app for how
+            // a head turn *sounds*. `Tools/handover` measured the two against the node
+            // on a 63°/s look-around: plain HRTF snaps to a filter grid and crossfades
+            // at each hand-over, so its high band wobbles *more* the more often it is
+            // handed an orientation — 0.245 dB per 10 ms at 480-frame cycles against
+            // 0.066 at 4096 — because every crossfade between two grid filters with
+            // different interaural delays is a partial cancellation up where the
+            // partials are. HRTFHQ interpolates between grid points, so it goes the
+            // other way, and at 1024-frame cycles it reaches 0.055 dB, under plain
+            // HRTF's best at any cycle length. It also holds a 1760 Hz partial to 2¢
+            // worst-case against HRTF's 7¢. Rendering cost is about equal on a still
+            // head and roughly double while moving, from a base of under 1% of a core.
+            busNode.renderingAlgorithm = .HRTFHQ
             busNodes.append(busNode)
         }
 
@@ -350,58 +505,6 @@ final class FlowHost: ObservableObject {
         }
     }
 
-    /// Where the listener is facing.
-    ///
-    /// Two guards on the way to the graph, and both are about how much work a
-    /// rotating listener costs rather than about the angle itself. Moving the
-    /// listener invalidates the HRTF for **all sixteen sources at once**, so this is
-    /// the single most expensive property in the whole spatial path — and it is
-    /// written from the main thread into a graph the render thread is reading.
-    ///
-    /// - A **dead band**: sub-third-of-a-degree changes are dropped. Standing still
-    ///   with AirPods in still produces a continuous jitter of tiny attitude
-    ///   updates, and every one of them was recomputing sixteen HRTFs to move the
-    ///   image by less than the ear can localise.
-    /// - A **rate cap**: at most one write per 45 ms. With an ~85 ms IO buffer the
-    ///   render thread only reads this a dozen times a second, so anything faster is
-    ///   provably discarded — it costs a lock against the audio thread to write a
-    ///   value nothing will ever read. The one-pole smoother in `HeadTracker` is
-    ///   what keeps the motion continuous between writes; this only decides how
-    ///   often the result is handed over.
-    ///
-    /// Neither changes what a head turn sounds like. Both cut the traffic on a live
-    /// graph by roughly half while walking, and to nearly nothing while still.
-    private func placeListener(_ head: HeadOrientation) {
-        motionUpdates += 1
-        // The handedness reconciliation that used to be three negations here now lives
-        // in `HeadSmoother.toListener`, so this only decides how often to hand the
-        // result over.
-        let want = head.orientation
-        let f = simd_float3(want.forward.x, want.forward.y, want.forward.z)
-        let u = simd_float3(want.up.x, want.up.y, want.up.z)
-        // The dead band, on unit vectors instead of summed Euler angles. Chord length
-        // is the rotation angle to well within a rounding error at this size, and it
-        // needs no trig; taking the larger of the two axes means a pure roll (which
-        // leaves `forward` alone entirely) is measured rather than ignored.
-        let moved = max(simd_length(f - listenerFacing.forward),
-                        simd_length(u - listenerFacing.up)) * 180 / .pi
-        guard moved > 0.3 else { return }
-        let now = CACurrentMediaTime()
-        guard now - lastListenerWrite > 0.045 else { return }
-        lastListenerWrite = now
-        listenerWrites += 1
-        listenerFacing = (f, u)
-        // So a drop detected on the audio thread can say where the head was pointing.
-        let gaze = asin(max(-1, min(1, Double(f.y)))) * 180 / .pi
-        dropoutWatch.gaze = gaze
-        markBuffer.currentGaze = gaze
-        // The Euler readout is display-grade, but yaw at the tilts a neck can hold is
-        // well-conditioned, and this only has to say which axis an event was on.
-        markBuffer.currentYaw = head.yaw
-        markBuffer.currentRaw = model.head.rawTilt
-        environment.listenerVectorOrientation = want
-    }
-
     private func applyField() {
         let field = model.field
         // Same reasoning as the listener, one level down: Flow ramps Radius and Lift
@@ -449,8 +552,8 @@ final class FlowHost: ObservableObject {
     /// point at arm's length — so there is nothing to weigh up.
     private func routeChanged() {
         // Before anything else: a new route comes with a new IO buffer, and the
-        // preference does not follow it across. See `requestLongBuffer`.
-        Self.requestLongBuffer()
+        // preference does not follow it across. See `requestBuffer`.
+        requestBuffer()
         // A route change reconfigures the IO unit, so the output clock restarts. That
         // is not a dropout, and counting it as one would put a gap in the log next to
         // every pair of AirPods going in.
@@ -491,13 +594,88 @@ final class FlowHost: ObservableObject {
     /// written to avoid. Denied permission, or headphones that don't report
     /// motion, degrade to the head-locked field with nothing to handle here —
     /// `HeadTracker` sorts itself out and reports why.
+    ///
+    /// The listener's switch is the first of the three conditions rather than a
+    /// fourth thing checked somewhere else, so "off" means the sensor is not read
+    /// at all — not read and then ignored.
     private func updateHeadTracking() {
-        let want = running && !model.route.isRoom
+        let want = headTrackingEnabled && running && !model.route.isRoom
         if model.headTracking != want {
             model.headTracking = want
             FlightRecorder.shared.note("head tracking \(want ? "ON" : "OFF") — \(model.head.status)")
         }
+        // The buffer follows the switch as well as the route. Flipped mid-session,
+        // iOS reconfigures IO for the new length, which may stop the engine underneath
+        // us the way a route change can; `watchSession` catches that and restarts it.
+        if running { requestBuffer() }
     }
+
+    // MARK: - Cadence
+
+    /// Cadence publishes once a second, and the tempo it hands over is already
+    /// smoothed — a jump is held until confirmed, a climb is followed as it climbs.
+    /// So this can be taken as read rather than smoothed again.
+    private func watchCadence() {
+        cadence.$estimate
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyCadence() }
+            }
+            .store(in: &cadenceWatch)
+        // The switch and the slider live in Cadence; the views bind to them
+        // through this object, so its changes have to be this object's changes.
+        cadence.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cadenceWatch)
+        cadence.$settings
+            .map(\.followsActivity)
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] follows in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if follows { Task { await self.cadence.requestAuthorization() } }
+                    FlightRecorder.shared.note("follow activity \(follows ? "ON" : "OFF")")
+                }
+            }
+            .store(in: &cadenceWatch)
+        applyCadence()
+    }
+
+    /// Hand the pulse's tempo to the clock.
+    ///
+    /// Through `setFollowedTempo` rather than `set(.tempo,)`, which is the only
+    /// call in the app that gets past the lock `followsPulse` puts up. The 0.05
+    /// deadband is not about cost — `set` already ignores an unchanged value — but
+    /// about the log and the readout, which would otherwise tick every five seconds
+    /// on a number that had not moved.
+    private func applyCadence() {
+        // Manual or followed, Cadence's tempo is the number to play.
+        let target = cadence.tempo
+        guard target.isFinite, target > 30 else { return }
+        if abs(target - model.tempo) > 0.05 { model.setFollowedTempo(target) }
+    }
+
+    /// Narrow Cadence's fold window to a drone's range.
+    ///
+    /// Read-modify-write rather than assigning a fresh `TempoMapping`, and that is
+    /// the whole reason this is a function: `trim` lives on the mapping but is
+    /// about the *body* — "the estimate reads high" — and is shared with the other
+    /// Phonotropic apps. Overwriting the struct wholesale would throw away a
+    /// correction the listener made in Meter, silently, on every launch. Guarded so
+    /// it writes only when something actually differs, since the setter saves.
+    private func adoptFoldWindow() {
+        var mapping = cadence.mapping
+        guard mapping.foldLow != Self.foldLow || mapping.foldHigh != Self.foldHigh else { return }
+        mapping.foldLow = Self.foldLow
+        mapping.foldHigh = Self.foldHigh
+        cadence.mapping = mapping
+    }
+
+    /// What the tempo is currently being told by, for the one line in the settings
+    /// screen whose job is to say so.
+    var tempoSource: String { cadence.estimate.sourceDescription }
 
     /// One line every thirty seconds, which is the whole diagnostic.
     ///
@@ -508,7 +686,7 @@ final class FlowHost: ObservableObject {
     private func startHeartbeat() {
         heartbeat?.invalidate()
         lastOverruns = engine.renderOverruns
-        motionUpdates = 0
+        _ = model.head.drainDiagnostics()
         // Starting or resuming moves the output clock legitimately; don't bill it as
         // a dropped cycle. Called here because this runs on every start and resume.
         pump?.resync()
@@ -531,15 +709,16 @@ final class FlowHost: ObservableObject {
         var sample = FlightSample()
         sample.load = engine.renderLoad
         sample.overruns = engine.renderOverruns - lastOverruns
-        sample.motionUpdates = motionUpdates
         sample.route = model.route.name.isEmpty ? "(no route)" : model.route.name
         sample.spatial = engine.spatialEnabled
         sample.tracking = model.head.status == .tracking
         sample.transport = transportName
         sample.buffer = bufferReport
         let head = model.head.drainDiagnostics()
-        sample.peakRate = head.peak
-        sample.clampedFrames = head.clamped
+        sample.motionUpdates = head.samples
+        sample.listenerWrites = head.writes
+        sample.peakRate = head.peakRate
+        sample.clampedFrames = head.clampedTicks
         sample.peakTilt = head.peakTilt
         sample.tiltLow = head.tilt.lowest
         sample.tiltHigh = head.tilt.highest
@@ -551,15 +730,12 @@ final class FlowHost: ObservableObject {
         sample.longestStallMilliseconds = head.longestStall * 1000
         sample.tiltAtStall = head.tiltAtStall
         sample.portSpatialCapable = portSupportsSpatialAudio
-        sample.listenerWrites = listenerWrites
-        listenerWrites = 0
         if let gaps = pump?.drainGaps() {
             sample.gaps = gaps.count
             sample.gapMilliseconds = Double(gaps.frames) / sampleRate * 1000
             sample.largestGapMilliseconds = Double(gaps.largest) / sampleRate * 1000
         }
         lastOverruns = engine.renderOverruns
-        motionUpdates = 0
         FlightRecorder.shared.note(sample.line)
     }
 
@@ -571,7 +747,7 @@ final class FlowHost: ObservableObject {
         // is honoured when the IO unit is configured, so asking after the engine is
         // already running gets the request filed for next time rather than applied
         // now. By here the route is known, which it was not at launch.
-        Self.requestLongBuffer()
+        requestBuffer()
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, options: [])
@@ -593,6 +769,10 @@ final class FlowHost: ObservableObject {
         routeChanged()
         model.flow.start()
         transport = .playing
+        // Only while something is playing. The pedometer and the HealthKit query
+        // are the same kind of cost as the head tracker, and following the pulse of
+        // a listener who is not listening buys nothing.
+        cadence.start(); applyCadence()
         // After `running`, not inside the `routeChanged()` above: head tracking is
         // gated on it, and asked a moment too early the answer is always no.
         updateHeadTracking()
@@ -601,6 +781,7 @@ final class FlowHost: ObservableObject {
         startArtworkRefresh()
         startHeartbeat()
         updateNowPlaying()
+        armSleepTimer()
         // The version belongs on this line because the log outlives the build that
         // wrote it. Diagnosing the head-tracking warble started by reading a copy that
         // had been pulled off the phone three days earlier, from a build whose
@@ -639,10 +820,13 @@ final class FlowHost: ObservableObject {
             self.model.flow.pause()
             self.audio.pause()
         }
-        // Nothing is being placed in a room that has gone quiet.
+        // Nothing is being placed in a room that has gone quiet, and nothing is
+        // being timed to a pulse that has nothing to time.
         updateHeadTracking()
+        cadence.stop()
         artworkTimer?.invalidate()
         updateNowPlaying()
+        disarmSleepTimer()
     }
 
     func resume() {
@@ -678,10 +862,16 @@ final class FlowHost: ObservableObject {
         model.flow.resume()
         fade(to: 1, over: Self.fadeIn)
         updateHeadTracking()
+        // Permission can be granted or taken away in Settings while this app is
+        // in the background, and nothing tells an app that happened.
+        cadence.refreshAuthorizationIfNeeded()
+        cadence.start()
+        applyCadence()
         touched()
         startArtworkRefresh()
         startHeartbeat()
         updateNowPlaying()
+        armSleepTimer()
     }
 
     /// Short enough not to feel like a delay, long enough that neither end is a
@@ -755,6 +945,7 @@ final class FlowHost: ObservableObject {
         withAnimation(.easeOut(duration: 0.6)) { dim = 1 }
         idle = false
         updateNowPlaying()
+        disarmSleepTimer()
     }
 
     /// What every play/pause control in the app, on the lock screen and in the car
@@ -927,6 +1118,47 @@ final class FlowHost: ObservableObject {
         }
     }
 
+    // MARK: - Sleep timer
+
+    /// Cancels and reschedules against `sleepMinutes`, called whenever that
+    /// changes and whenever playback starts or resumes. Only meaningful while
+    /// playing — there is nothing to fade out of a paused drone.
+    private func armSleepTimer() {
+        sleepTimer?.invalidate()
+        guard sleepMinutes > 0, running else {
+            sleepUntil = nil
+            sleepRemaining = nil
+            return
+        }
+        let until = Date().addingTimeInterval(Double(sleepMinutes) * 60)
+        sleepUntil = until
+        sleepRemaining = until.timeIntervalSinceNow
+        sleepTimer = Timer.scheduledTimer(withTimeInterval: until.timeIntervalSinceNow, repeats: false) {
+            [weak self] _ in
+            Task { @MainActor in self?.pause() }
+        }
+    }
+
+    private func disarmSleepTimer() {
+        sleepTimer?.invalidate()
+        sleepTimer = nil
+        sleepUntil = nil
+        sleepRemaining = nil
+    }
+
+    /// The countdown shown next to the moon glyph — a separate, cheap timer
+    /// rather than reusing the fire-once one above, since that one only needs
+    /// to exist at all once, at the far end of the wait.
+    private func startSleepDisplayTicker() {
+        sleepDisplayTicker?.invalidate()
+        sleepDisplayTicker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let until = self.sleepUntil else { return }
+                self.sleepRemaining = max(0, until.timeIntervalSinceNow)
+            }
+        }
+    }
+
     // MARK: - Session plumbing
 
     /// The iOS equivalents of the Mac app's configuration-change watchdog.
@@ -1007,6 +1239,21 @@ final class FlowHost: ObservableObject {
             // this is here for the engine, which iOS may have stopped underneath us.
             MainActor.assumeIsolated { self?.recoverIfStopped() }
         })
+
+        // The engine's own word for "I stopped and you need to restart me". A route
+        // change usually comes with one of these, but an IO buffer change — which
+        // `updateHeadTracking` now asks for mid-session — need not come with a route
+        // change, so it is watched directly rather than inferred.
+        observers.append(centre.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: audio, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                FlightRecorder.shared.note("engine configuration changed — \(self.bufferReport)")
+                self.pump?.resync()
+                self.recoverIfStopped()
+            }
+        })
     }
 
     /// For the failures that are *not* interruptions: a route change or a media
@@ -1037,144 +1284,6 @@ final class FlowHost: ObservableObject {
     /// custom drawing, so the Metal field could never appear there. The template
     /// would be the same shape as every other player's, which is a lot of process
     /// for a screen this app has no content to fill.
-    private func configureRemoteCommands() {
-        let centre = MPRemoteCommandCenter.shared()
-        // Play resumes where it was paused; it only starts a fresh journey if there
-        // isn't one yet. Pause holds. Neither of them lets go of the drone — the
-        // earlier version wired pause straight to `stop()`, which faded every voice
-        // and ended the session, so pressing play afterwards began a whole new one
-        // in a different key. On a lock screen those two buttons have to mean what
-        // they mean everywhere else.
-        // Every one of these records that it arrived, for the same reason `rate` does:
-        // the difference between a command that never reached the app and one that
-        // landed and did nothing is invisible from the driver's seat, and it is the
-        // first thing worth knowing about "the play button did nothing". These were
-        // the only controls in the app with no line in the log.
-        centre.playCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            MainActor.assumeIsolated { self.play(from: "remote ▶") }
-            return .success
-        }
-        centre.pauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            MainActor.assumeIsolated {
-                FlightRecorder.shared.note("remote ⏸ — transport \(self.transport)")
-                self.pause()
-            }
-            return .success
-        }
-        centre.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            MainActor.assumeIsolated { self.toggle(from: "remote ⏯") }
-            return .success
-        }
-
-        // The thumbs, away from the app's own screen.
-        //
-        // **What iOS actually draws for these is not a thumb.** `MPFeedbackCommand`
-        // is the only rating API Now Playing has, and the system renders `like` as a
-        // ★ — while `dislike` gets no slot on the iOS lock screen at all. So this
-        // buys exactly one control there, and it is a star meaning "more like this".
-        // The car is the better citizen: `CPNowPlayingTemplate` takes the two real
-        // thumb glyphs, which is where `iOS/CarPlay.swift` puts them.
-        //
-        // Getting two labelled thumbs onto the lock screen itself needs a Live
-        // Activity with interactive App Intent buttons — a widget extension, a new
-        // target and a new signing surface. Worth doing for an app that spends its
-        // life behind a locked screen, but it is a separate piece of work and this
-        // is what the transport API can honestly give.
-        //
-        // `isActive` is what fills the star in, and it is a *latch* — set it and the
-        // control stays filled until something clears it. Latched is right for "I
-        // have liked this song" and wrong here: there is no song, only a drone that
-        // has already drifted on, and a star still filled twenty minutes later would
-        // be making a claim about music that stopped playing long ago.
-        //
-        // But leaving it permanently false, as this did, means the one control the
-        // lock screen gives us never acknowledges a press at all — and the toast that
-        // `rate` shows lives in the app's own window, which is precisely the thing the
-        // listener is not looking at. A press into silence reads as a broken button.
-        //
-        // So: fill it, then clear it. Long enough to be seen on a glance at a locked
-        // screen, short enough that it is plainly a receipt for what was just pressed
-        // rather than a standing state.
-        centre.likeCommand.isEnabled = true
-        centre.likeCommand.localizedTitle = "More like this"
-        centre.likeCommand.localizedShortTitle = "More"
-        centre.likeCommand.isActive = false
-        centre.likeCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            MainActor.assumeIsolated {
-                self.rate(.up, from: "lock ★")
-                self.acknowledge(centre.likeCommand)
-            }
-            return .success
-        }
-
-        // Enabled for CarPlay's sake even though the phone's lock screen will not
-        // draw it. Costs nothing, and the car is where it appears.
-        centre.dislikeCommand.isEnabled = true
-        centre.dislikeCommand.localizedTitle = "Less like this"
-        centre.dislikeCommand.localizedShortTitle = "Less"
-        centre.dislikeCommand.isActive = false
-        centre.dislikeCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            MainActor.assumeIsolated {
-                self.rate(.down, from: "lock 👎")
-                self.acknowledge(centre.dislikeCommand)
-            }
-            return .success
-        }
-
-        // **⏭ is the other thumb**, since the lock screen will not give us one.
-        //
-        // A repurposed transport button is normally a bad idea, but the usual
-        // objection does not survive contact with this app: there is no next track
-        // in a continuous drone, so ⏭ has no honest meaning to displace. What it
-        // *does* mean to a listener — "I have had enough of this one, move along" —
-        // is precisely what a thumbs-down says, and it is what `rate(.down)` does.
-        //
-        // An earlier version of this comment argued the opposite, that ⏭ was wrong
-        // because cycling a timbre from a steering wheel would click. That objection
-        // was about a *raw* cycle. `rate(.down)` doesn't do one: it goes through
-        // `FlowDirector.moveOn`, which changes a single quality on that quality's
-        // own ramp — the spectrum crossfade, the glide — exactly as the scheduled
-        // version does. Nothing reached from here can arrive any more abruptly than
-        // Flow's own gestures.
-        //
-        // What is lost is discoverability, and there is no fixing it from here:
-        // `localizedTitle` lives on `MPFeedbackCommand`, not on `MPRemoteCommand`, so
-        // a transport button cannot be relabelled at all. It draws as ⏭ and reads as
-        // "Next Track" to VoiceOver. That is the price of the mapping, and the reason
-        // the car keeps its own labelled 👎 alongside it rather than relying on this.
-        centre.nextTrackCommand.isEnabled = true
-        centre.nextTrackCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            MainActor.assumeIsolated { self.rate(.down, from: "⏭") }
-            return .success
-        }
-
-        // Everything else off, so nothing draws a control that does nothing.
-        //
-        // Skip forward/back matters more than it looks: it is what iOS falls back to
-        // for a live stream with no next track, it defaults to *enabled*, and leaving
-        // it out of this list put two dead ⏪ ⏩ on the lock screen — a drone has
-        // nowhere to seek to. Disabling next/previous is not sufficient on its own.
-        // ⏮ stays off deliberately: there is no "previous" quality to go back to,
-        // and a thumbs-down that could be undone would need to un-spread a vote
-        // across thirty traits.
-        for command in [centre.previousTrackCommand,
-                        centre.seekForwardCommand, centre.seekBackwardCommand,
-                        centre.skipForwardCommand, centre.skipBackwardCommand,
-                        centre.changePlaybackPositionCommand,
-                        centre.changeRepeatModeCommand, centre.changeShuffleModeCommand,
-                        centre.ratingCommand, centre.bookmarkCommand] {
-            command.isEnabled = false
-        }
-    }
-
-    /// Keep the car and lock screen showing what Flow is currently playing.
-    ///
     /// Subscribed to `harmony` rather than polled, and that distinction is the
     /// whole reason this is safe to do: Flow moves the mode every few minutes, so
     /// this fires a handful of times an hour. The earlier version deliberately
@@ -1189,36 +1298,7 @@ final class FlowHost: ObservableObject {
             }
     }
 
-    private func updateNowPlaying() {
-        var info: [String: Any] = [
-            // What Flow is actually playing, which in a car is the only thing
-            // worth reading and is genuinely useful — "DmMaj7 / D Melodic Minor"
-            // tells you where the drone has drifted to without looking at a phone.
-            MPMediaItemPropertyTitle: model.harmony.title,
-            MPMediaItemPropertyArtist: "Thrum · \(model.harmony.subtitle)",
-            MPMediaItemPropertyAlbumTitle: transportName,
-            // Endless by design, so no scrubber and no duration — without this the
-            // car draws a progress bar that can never move.
-            MPNowPlayingInfoPropertyIsLiveStream: true,
-            MPNowPlayingInfoPropertyPlaybackRate: running ? 1.0 : 0.0,
-        ]
-        if let art = artwork { info[MPMediaItemPropertyArtwork] = art }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        // The playback *state* is separate from the info dictionary, and setting
-        // only the dictionary is what leaves a lock screen showing a play triangle
-        // over audible sound (or a pause bar over silence). iOS decides which glyph
-        // to draw from this.
-        // `.paused` rather than `.stopped` for a session that has not begun, and this
-        // is a CarPlay fix rather than a cosmetic one. `.stopped` is the state that
-        // says "this app is finished playing"; a car that reconnects to a launched-but-
-        // idle Thrum reads it as nothing to control, and its transport buttons have
-        // nowhere to go. Since `nowPlayingInfo` is published from `init` regardless —
-        // the app is claiming the slot either way — `.paused` is both the more honest
-        // description of a drone waiting to be started and the state in which a play
-        // button is live.
-        MPNowPlayingInfoCenter.default().playbackState =
-            transport == .playing ? .playing : .paused
-    }
+    private func updateNowPlaying() { Dashboard.update() }
 
     private var transportName: String {
         switch transport {
@@ -1237,7 +1317,7 @@ final class FlowHost: ObservableObject {
     ///
     /// Falls back to the static icon before anything is sounding, since a black
     /// square looks like a failure to load.
-    private var artwork: MPMediaItemArtwork? {
+    private var artwork: UIImage? {
         // A paused drone still has voices held at their levels, so the field is
         // still the honest picture of it — only a session that has never begun
         // falls back to the icon.
@@ -1245,14 +1325,10 @@ final class FlowHost: ObservableObject {
         var scratch = artScratch
         let filled = fillField(&scratch)
         guard filled.count > 0 else { return Self.staticArtwork }
-        let image = FieldArtwork.render(voices: scratch, count: Int(filled.count), master: filled.master)
-        return MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        return FieldArtwork.render(voices: scratch, count: Int(filled.count), master: filled.master)
     }
 
-    private static let staticArtwork: MPMediaItemArtwork? = {
-        guard let image = UIImage(named: "NowPlayingArt") else { return nil }
-        return MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-    }()
+    private static let staticArtwork: UIImage? = UIImage(named: "NowPlayingArt")
 
     /// Refresh the artwork while Flow runs, so the picture in the car follows the
     /// music instead of freezing on whatever was sounding when it started.
@@ -1342,6 +1418,7 @@ final class FlowHost: ObservableObject {
         observers.removeAll()
         model.route.shutdown()
         model.pulse.stop()
+        cadence.stop()
         audio.stop()
         try? AVAudioSession.sharedInstance().setActive(false)
     }
@@ -1364,9 +1441,15 @@ final class FlowHost: ObservableObject {
 /// and is not `@MainActor` — the render thread touches it.
 private final class SpatialPump {
     let engine: DroneEngine
+    /// Ticked once per cycle, so the head-tracking transport runs on this clock and
+    /// hands the environment node one orientation per cycle — see `HeadTracker`.
+    let head: HeadTracker
     private var lastSampleTime: Double = -1
 
-    init(engine: DroneEngine) { self.engine = engine }
+    init(engine: DroneEngine, head: HeadTracker) {
+        self.engine = engine
+        self.head = head
+    }
 
     /// Where the output clock should be next cycle, and what happened when it wasn't.
     ///
@@ -1376,8 +1459,8 @@ private final class SpatialPump {
     /// `DroneEngine.renderLoad` and `renderOverruns` bracket `renderSpatial` with
     /// `mach_absolute_time` — so they measure *our* DSP and nothing else. Downstream
     /// of that sit sixteen `AVAudioEnvironmentNode` HRTF instances, AVAudioEngine's
-    /// own graph lock (which the main thread takes every time `placeListener` writes a
-    /// new orientation, sixteen times a second), and the Bluetooth link. A stall in
+    /// own graph lock (which the head pacer takes at most once per cycle when `ListenerSink`
+    /// writes a new orientation), and the Bluetooth link. A stall in
     /// any of those is a hole in the audio and leaves `overruns 0` in the log, which
     /// is exactly what the 08-11 session shows: load 0.09–0.32, overruns 0, clamped 0,
     /// and a listener hearing notes drop out.
@@ -1419,6 +1502,83 @@ private final class SpatialPump {
             }
             expectedNext = t + Double(frames)
             engine.renderSpatial(frameCount: frames)
+            head.tick()
         }
+    }
+}
+
+/// The last hop of the head-tracking transport: where sixteen HRTFs are told
+/// which way the listener is facing.
+///
+/// Not a method on `FlowHost`, because it does not run on the main thread. The
+/// tracker's pacer calls this once per render cycle, and moving the listener
+/// invalidates the HRTF for **all sixteen sources at once** — the single most
+/// expensive property in the whole spatial path, written into a graph the render
+/// thread is reading. Doing it from the main thread meant doing it from a thread
+/// that is also drawing a Metal field, and doing it on the sensor's schedule meant
+/// doing it at a rate the render cycle then resampled — see `HeadTransport`.
+///
+/// What used to be here besides the write — a dead band and a 45 ms rate cap —
+/// is gone. The rate cap was the third unrelated clock in the chain and the dead
+/// band now lives in `HeadTransport`, where it is measured against what was last
+/// written rather than what was last received.
+///
+/// `DropoutWatch` and `MarkBuffer` are already written from one thread and read
+/// from the audio thread; this only changes which thread writes.
+private final class ListenerSink: @unchecked Sendable {
+    private let environment: AVAudioEnvironmentNode
+    private let head: HeadTracker
+    private let dropoutWatch: DropoutWatch
+    private let markBuffer: MarkBuffer
+
+    init(environment: AVAudioEnvironmentNode, head: HeadTracker,
+         dropoutWatch: DropoutWatch, markBuffer: MarkBuffer) {
+        self.environment = environment
+        self.head = head
+        self.dropoutWatch = dropoutWatch
+        self.markBuffer = markBuffer
+    }
+
+    func place(_ orientation: HeadOrientation) {
+        // So a drop detected on the audio thread can say where the head was pointing.
+        let gaze = orientation.gaze
+        dropoutWatch.gaze = gaze
+        markBuffer.currentGaze = gaze
+        // The Euler readout is display-grade, but yaw at the tilts a neck can hold is
+        // well-conditioned, and this only has to say which axis an event was on.
+        markBuffer.currentYaw = orientation.yaw
+        markBuffer.currentRaw = head.rawTilt
+        // Rotating the *listener* with the head is what leaves the sources standing
+        // still in the room. The handedness reconciliation lives in
+        // `HeadMath.toListener`; this is only the hand-over.
+        environment.listenerVectorOrientation = orientation.orientation
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+
+/// Thrum on the lock screen and in the car.
+extension FlowHost: DashboardHost {
+    var isPlaying: Bool { transport == .playing }
+
+    func dashboardPlay()  { play(from: "the lock screen, the car or headphones") }
+    func dashboardPause() { pause() }
+
+    /// What Flow is actually playing, which in a car is the only thing worth
+    /// reading — "DmMaj7 / D Melodic Minor" tells you where the drone has
+    /// drifted to without looking at a phone.
+    var dashboardTitle: String { model.harmony.title }
+    var dashboardDetail: String { "Thrum · \(model.harmony.subtitle)" }
+
+    /// The field as it is right now, from the same voice data and ring
+    /// geometry the shader uses — so the car and the phone show the same
+    /// picture of the same chord.
+    func dashboardArtwork() -> UIImage? { artwork }
+
+    var dashboardHasTaste: Bool { true }
+
+    func dashboardRate(up: Bool) {
+        rate(up ? .up : .down, from: up ? "the star" : "⏭")
     }
 }

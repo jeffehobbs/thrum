@@ -19,21 +19,23 @@ for i in 0..<MIDIGetNumberOfDestinations() {
     print("  [\(i)] \(name(MIDIGetDestination(i)))")
 }
 
-// What Thrum's matchers would pick.
-for (label, needle, hint) in [("Launchpad", "Launchpad X", "MIDI"),
-                              ("LaunchControl", "Launch Control", nil)] {
-    var src = "none", dst = "none"
-    for i in 0..<MIDIGetNumberOfSources() {
-        let n = name(MIDIGetSource(i))
-        guard n.localizedCaseInsensitiveContains(needle) else { continue }
-        if let h = hint, !n.localizedCaseInsensitiveContains(h) { continue }
-        src = n; break
+// What Thrum's matchers would pick. Mirrors MIDISurface.pick(_:), including
+// the port hint being a preference rather than a requirement.
+func pick(_ endpoints: [MIDIEndpointRef], _ needles: [String], _ hint: String?) -> String {
+    var fallback: String?
+    for ep in endpoints {
+        let n = name(ep)
+        guard needles.contains(where: { n.localizedCaseInsensitiveContains($0) }) else { continue }
+        guard let hint else { return n }
+        if n.localizedCaseInsensitiveContains(hint) { return n }
+        if fallback == nil { fallback = n }
     }
-    for i in 0..<MIDIGetNumberOfDestinations() {
-        let n = name(MIDIGetDestination(i))
-        guard n.localizedCaseInsensitiveContains(needle) else { continue }
-        if let h = hint, !n.localizedCaseInsensitiveContains(h) { continue }
-        dst = n; break
-    }
-    print("\(label): in=\(src)  out=\(dst)")
+    return fallback ?? "none"
+}
+
+let sources = (0..<MIDIGetNumberOfSources()).map(MIDIGetSource)
+let destinations = (0..<MIDIGetNumberOfDestinations()).map(MIDIGetDestination)
+for (label, needles, hint) in [("Launchpad", ["Launchpad X", "LPX"], "MIDI"),
+                              ("LaunchControl", ["Launch Control", "LCXL", "Launchpad Control XL"], "MIDI")] {
+    print("\(label): in=\(pick(sources, needles, hint))  out=\(pick(destinations, needles, hint))")
 }

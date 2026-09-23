@@ -14,9 +14,15 @@ import AVFoundation
 /// touched from the render thread.
 private final class SpatialPump {
     let engine: DroneEngine
+    /// Ticked once per cycle, so the head-tracking transport runs on this clock and
+    /// hands the environment node one orientation per cycle — see `HeadTracker`.
+    let head: HeadTracker
     private var lastSampleTime: Double = -1
 
-    init(engine: DroneEngine) { self.engine = engine }
+    init(engine: DroneEngine, head: HeadTracker) {
+        self.engine = engine
+        self.head = head
+    }
 
     @inline(__always)
     func renderIfNeeded(_ timestamp: UnsafePointer<AudioTimeStamp>, _ frames: Int) {
@@ -24,6 +30,7 @@ private final class SpatialPump {
         if t != lastSampleTime {
             lastSampleTime = t
             engine.renderSpatial(frameCount: frames)
+            head.tick()
         }
     }
 }
@@ -70,7 +77,10 @@ final class ThrumHost: ObservableObject {
         sampleRate = sr
         engine.setSampleRate(sr)
 
-        let model = ThrumModel(engine: engine)
+        // A real taste store, or the thumbs write to a database that evaporates on
+        // quit. `~/Library/Application Support/Thrum/taste.json` — the same file
+        // shape the phone keeps in its container, so `Tools/taste` reads either.
+        let model = ThrumModel(engine: engine, taste: Taste(store: Taste.defaultStore))
         self.model = model
         launchpad = LaunchpadController(model: model)
         launchControl = LaunchControlController(model: model)
@@ -98,7 +108,7 @@ final class ThrumHost: ObservableObject {
         model.onSpatialChange = { [weak self] on in self?.setSpatial(on) }
         model.onFieldChange = { [weak self] in self?.scheduleFieldUpdate() }
         // Vectors, not angles — and the handedness reconciliation that used to live
-        // here as three negations now lives in `HeadSmoother.toListener`, which is
+        // here as three negations now lives in `HeadMath.toListener`, which is
         // the same rotation expressed once and testable. It has to be reconciled
         // somewhere: measured with Tools/axis, `AVAudio3DAngularOrientation` treats
         // positive yaw and roll as turning the listener *clockwise* — yaw +90° moves
@@ -110,10 +120,12 @@ final class ThrumHost: ObservableObject {
         // Driving `listenerVectorOrientation` also means no Euler angle is formed
         // anywhere between the sensor and the node, which is what stopped the field
         // lurching when a listener's relative pitch crossed vertical. See
-        // `HeadSmoother`.
-        model.head.onOrientation = { [weak self] head in
-            self?.environment.listenerVectorOrientation = head.orientation
-        }
+        // `HeadMath`.
+        //
+        // Called on the tracker's pacer thread, once per render cycle — so the node
+        // is captured directly rather than reached through this main-actor host.
+        let environment = self.environment
+        model.head.onOrientation = { environment.listenerVectorOrientation = $0.orientation }
 
         // Both land on the same place; the route changes on its own when the
         // system output moves, the mode changes when the user overrides it.
@@ -174,7 +186,7 @@ final class ThrumHost: ObservableObject {
               let stereo = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return }
 
         let kernel = engine
-        let pump = SpatialPump(engine: kernel)
+        let pump = SpatialPump(engine: kernel, head: model.head)
         self.pump = pump
 
         audio.attach(environment)
@@ -197,7 +209,16 @@ final class ThrumHost: ObservableObject {
             }
             audio.attach(node)
             audio.connect(node, to: environment, format: mono)
-            node.renderingAlgorithm = .HRTF
+            // HRTFHQ, not HRTF — the same decision as ThrumFlow, for the same
+            // measurement (`Tools/handover`): plain HRTF snaps to a filter grid and
+            // crossfades at every orientation hand-over, so a turning head flickers
+            // in the high band *more* the more often the field is updated, and the
+            // transport now updates it once per render cycle. HRTFHQ interpolates,
+            // flickers less than plain HRTF at any cycle length, and holds a partial
+            // to ~2¢ through a turn against 7¢. The Mac never asks for a buffer;
+            // CoreAudio's default 512 frames is already in the range that measured
+            // best. Cost is about double while moving, from a base of ~0.2% of a core.
+            node.renderingAlgorithm = .HRTFHQ
             busNodes.append(node)
         }
 
@@ -383,6 +404,15 @@ struct ThrumCommands: Commands {
         CommandMenu("Flow") {
             Button(model.flow.isRunning ? "Stop Flow" : "Start Flow") { model.flow.toggle() }
                 .keyboardShortcut("f", modifiers: [.command, .option])
+            Divider()
+            // Deliberately never disabled: rating the tail of a drone you have just
+            // stopped is a case `FlowDirector.rate` supports by design, and gating
+            // on `model.flow.isRunning` here would also walk into the frozen-menus
+            // trap this struct's doc comment exists to warn about.
+            Button("More Like This") { model.rate(.up) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            Button("Less Like This") { model.rate(.down) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
         }
         CommandMenu("Field") {
             Button(model.spatialEnabled ? "Back to Stereo" : "Spatial Field") {

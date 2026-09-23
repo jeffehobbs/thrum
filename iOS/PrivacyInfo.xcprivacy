@@ -20,7 +20,16 @@
        in Application Support; no file *timestamps* are read, no disk space is
        queried, and no boot time or active-keyboard information is used. If any
        of that changes, this file has to change with it — a missing declaration
-       is ITMS-91053 on upload, not a warning you find later. -->
+       is ITMS-91053 on upload, not a warning you find later.
+
+       Following a pulse (Cadence, added 1.1.0) does not change either array, and
+       the reason it does not is worth stating rather than assuming. Heart rate,
+       resting heart rate and movement are *read*, on the device, and the tuning
+       they produce is written to one file in the app group container with
+       complete file protection. Apple's "collect" means transmitted off the
+       device, and there is nowhere for any of it to go: still no network code in
+       the target. Cadence's own file writes are ordinary `Data.write`, and its
+       UserDefaults use is already covered by CA92.1 above. -->
   <key>NSPrivacyTracking</key>
   <false/>
   <key>NSPrivacyTrackingDomains</key>

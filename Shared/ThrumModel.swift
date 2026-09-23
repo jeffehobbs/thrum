@@ -1,6 +1,9 @@
 import Foundation
 import SwiftUI
 import Combine
+#if os(macOS)
+import Ensemble
+#endif
 
 /// Every continuous control in Thrum, declared once.
 ///
@@ -124,6 +127,27 @@ public final class ThrumModel: ObservableObject {
     /// in a real store.
     public let taste: Taste
 
+    /// A thumb, from any control that has only the model — the Mac's header
+    /// buttons and its Flow menu.
+    ///
+    /// `FlowDirector.rate` does all the real work (the vote, the five-second
+    /// correction window, the status line); this adds only the wall-clock backstop
+    /// that closes the window when Flow's own clock is not advancing. Same
+    /// reasoning as the iOS host's timer, which is the other caller of this shape:
+    /// rating the tail of a drone you have just stopped is allowed, and without a
+    /// wall clock that vote has nothing to expire against and is never written
+    /// down. Slightly past the window so the clock path wins whenever there is one.
+    public func rate(_ vote: Taste.Vote) {
+        flow.rate(vote)
+        voteWindowTimer?.invalidate()
+        voteWindowTimer = Timer.scheduledTimer(withTimeInterval: FlowDirector.correctionWindow + 0.2,
+                                               repeats: false) { _ in
+            Task { @MainActor [weak self] in self?.flow.commitVote() }
+        }
+    }
+
+    private var voteWindowTimer: Timer?
+
     // MARK: Pulse
 
     /// The clock and the four arpeggiators. Runs off the main thread; it is
@@ -139,10 +163,71 @@ public final class ThrumModel: ObservableObject {
     /// Last preset applied, so the Launchpad can light it.
     @Published public var pulsePreset: Int? = nil
 
+    /// True while something outside this app owns the tempo.
+    ///
+    /// The ensemble is the macOS answer to that question and has its own guard
+    /// below; this is the phone's, where the other authority is the listener's own
+    /// pulse. Kept here rather than on the iOS host because the refusal has to sit
+    /// where *every* writer already passes — Flow's tempo arc, a preset's own bpm,
+    /// a tap, the slider — which is `set(_:_:)` and nowhere else.
+    ///
+    /// Deliberately not wrapped in `#if os(iOS)`: a lock the Mac build cannot even
+    /// compile is a lock `Tools/` cannot test, and it costs one `false` Bool to
+    /// leave it in.
+    @Published public var tempoIsFollowed = false
+    /// Set while the follower is writing, so its own value gets through the guard
+    /// it just put up. Exactly the `ensembleIsWriting` trick, for the same reason.
+    private var tempoIsWriting = false
+
+    /// The one door through `tempoIsFollowed`.
+    ///
+    /// Everything else that wants the tempo is refused while a follower owns it;
+    /// this is how the follower itself gets in. It is a no-op when nothing is
+    /// following, so a caller does not have to check first.
+    public func setFollowedTempo(_ bpm: Double) {
+        tempoIsWriting = true
+        set(.tempo, bpm)
+        tempoIsWriting = false
+    }
+
     // MARK: Flow
 
     /// The instrument playing itself. Lazily made because it needs `self`.
     public lazy var flow: FlowDirector = FlowDirector(model: self)
+
+    // MARK: Ensemble
+
+#if os(macOS)
+    /// This app's place alongside Meter and Echo. Thrum holds the key by
+    /// default — the harmony is what a drone *is*, and its own Flow already
+    /// moves the key around, which the other two now get to hear.
+    ///
+    /// macOS only. The iOS build is a thing you prop up and leave playing with
+    /// nothing beside it, and there is no cross-process notification on iOS to
+    /// carry this even if there were something to talk to.
+    public let ensemble = EnsembleController(app: .thrum)
+    /// Set while the ensemble is writing the harmony, so `harmonyChanged` knows
+    /// not to publish a value straight back to the app it came from, and so the
+    /// guards below let it through.
+    private var ensembleIsWriting = false
+    private var lastRealign = 0
+#endif
+
+    /// Whether the harmony is this app's to change.
+    ///
+    /// False while following somebody else's key, and that refusal covers Flow
+    /// as well as the player: Flow reaches the harmony through `setKey` and
+    /// `setMode` like everything else, so an instrument that is following does
+    /// not quietly argue with what it is following. Refusing outright rather
+    /// than letting a change land and be pulled back a moment later — a key
+    /// that springs back is far worse on stage than a control that says no.
+    public var ownsHarmony: Bool {
+#if os(macOS)
+        return ensembleIsWriting || !ensemble.isFollowing(.key)
+#else
+        return true
+#endif
+    }
 
     // MARK: Spatial
 
@@ -222,6 +307,9 @@ public final class ThrumModel: ObservableObject {
     @Published public var values: [Double] = []
 
     private var statusResetWork: DispatchWorkItem?
+#if os(macOS)
+    private var ensembleSubscriptions: Set<AnyCancellable> = []
+#endif
 
     /// `taste` is optional rather than defaulted to `Taste()` because a default
     /// argument is evaluated in the caller's context, which is not this actor.
@@ -245,6 +333,9 @@ public final class ThrumModel: ObservableObject {
         }
         pushFeel()
         pulseChanged()
+#if os(macOS)
+        joinEnsemble()
+#endif
 
         // Four hertz is enough to notice the last voice finishing its fade and
         // to keep a load readout honest, without being a load of its own.
@@ -418,6 +509,19 @@ public final class ThrumModel: ObservableObject {
         let spec = Self.specs[i]
         let clamped = min(max(v, spec.range.lowerBound), spec.range.upperBound)
         guard values[i] != clamped else { return }
+        // Following a pulse means following it — Flow's tempo arc, a preset's bpm
+        // and a tap all arrive here, and all of them are somebody else's opinion
+        // about a number the body is currently deciding.
+        if p == .tempo, !tempoIsWriting, tempoIsFollowed { return }
+#if os(macOS)
+        // The tempo is not this app's to move while it is following one. Covers
+        // the slider, the Launch Control's knob, a tap, a preset's own bpm and
+        // Flow's tempo arc in one place, because all five arrive here.
+        if p == .tempo, !ensembleIsWriting, ensemble.isFollowing(.tempo) {
+            show("Tempo follows \(ensemble.owner(of: .tempo)?.name ?? "the ensemble")")
+            return
+        }
+#endif
         values[i] = clamped
         spec.set(self, clamped)
     }
@@ -443,6 +547,9 @@ public final class ThrumModel: ObservableObject {
         pushAllTunings()
         // Which columns count as chord tones just changed under the lanes.
         pulseChanged()
+#if os(macOS)
+        if !ensembleIsWriting { publishKey() }
+#endif
     }
 
     private func pushAllTunings() {
@@ -450,6 +557,7 @@ public final class ThrumModel: ObservableObject {
     }
 
     public func setKey(_ pc: Int) {
+        guard ownsHarmony else { return refuseHarmony() }
         harmony.keyPitchClass = ((pc % 12) + 12) % 12
         show("Key → \(Pitch.name(harmony.keyPitchClass)) \(harmony.mode.name)")
     }
@@ -465,6 +573,7 @@ public final class ThrumModel: ObservableObject {
 
     public func setMode(_ index: Int) {
         guard index >= 0, index < ModeCatalog.all.count else { return }
+        guard ownsHarmony else { return refuseHarmony() }
         harmony.modeIndex = index
         modeBank = index / ModeCatalog.bankSize
         show("\(harmony.title) — \(harmony.mode.name)")
@@ -482,8 +591,19 @@ public final class ThrumModel: ObservableObject {
     }
 
     public func toggleReference() {
+        // Shared, because it has to be: two instruments a third of a semitone
+        // apart is the one disagreement in this arrangement that is unlistenable
+        // rather than merely untidy.
+        guard ownsHarmony else { return refuseHarmony() }
         harmony.a4 = harmony.a4 == 440 ? 432 : 440
         show("Reference pitch → A\(Int(harmony.a4))")
+    }
+
+    private func refuseHarmony() {
+#if os(macOS)
+        let owner = ensemble.owner(of: .key)?.name ?? "the ensemble"
+        show("Key follows \(owner)")
+#endif
     }
 
     public func setTimbre(_ i: Int) {
@@ -958,6 +1078,76 @@ public final class ThrumModel: ObservableObject {
         pulsePreset = i
         show("\(p.name) — \(p.detail)")
     }
+
+#if os(macOS)
+    // MARK: - Ensemble
+
+    private func joinEnsemble() {
+        // Thrum opens no virtual MIDI ports of its own — it reads a Launchpad
+        // and a Launch Control and that is all — so there is nothing here the
+        // others need to be told to ignore.
+        ensemble.setOwnMIDIUIDs([])
+
+        ensemble.onKey = { [weak self] key in
+            guard let self else { return }
+            var next = self.harmony
+            next.keyPitchClass = key.tonic
+            // The scale list is Thrum's own mode catalog, in Thrum's order, so
+            // the crossing is an index rather than a lookup table that can rot.
+            if let index = EnsembleScale.allCases.firstIndex(of: key.scale),
+               index < ModeCatalog.all.count {
+                next.modeIndex = index
+                self.modeBank = index / ModeCatalog.bankSize
+            }
+            next.a4 = key.a4
+            guard next != self.harmony else { return }
+            self.ensembleIsWriting = true
+            self.harmony = next
+            self.ensembleIsWriting = false
+            self.show("\(self.harmony.subtitle) — from \(self.ensemble.owner(of: .key)?.name ?? "the ensemble")")
+        }
+
+        ensemble.onTempo = { [weak self] tempo in
+            // The number, for the slider and for the swing arithmetic. Where the
+            // beats actually fall comes from the grid itself, which the pulse
+            // reads on its own queue — see `PulseCore.follow`.
+            guard let self else { return }
+            self.ensembleIsWriting = true
+            self.set(.tempo, min(200, max(20, tempo.bpm)))
+            self.ensembleIsWriting = false
+        }
+
+        ensemble.onTransport = { [weak self] transport in
+            guard let self else { return }
+            if transport.isRunning != self.pulseRunning { self.pulseRunning = transport.isRunning }
+            if transport.realignCount != self.lastRealign {
+                self.lastRealign = transport.realignCount
+                self.pulse.realign()
+            }
+        }
+
+        // Roles can change while running, and the pulse needs to know whether it
+        // is reading a grid or keeping its own time.
+        ensemble.$roles
+            .map { $0[.tempo] == .follow }
+            .removeDuplicates()
+            .sink { [weak self] following in
+                guard let self else { return }
+                self.pulse.follow(following ? self.ensemble.clock : nil)
+            }
+            .store(in: &ensembleSubscriptions)
+
+        publishKey()
+    }
+
+    private func publishKey() {
+        guard ensemble.isLeading(.key) else { return }
+        let scale = EnsembleScale.allCases[min(harmony.modeIndex, EnsembleScale.allCases.count - 1)]
+        ensemble.publish(key: EnsembleKey(tonic: harmony.keyPitchClass,
+                                         scale: scale,
+                                         a4: harmony.a4))
+    }
+#endif
 
     // MARK: - Status
 

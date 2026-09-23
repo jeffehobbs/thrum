@@ -27,13 +27,13 @@ func check(_ ok: Bool, _ label: String, _ detail: String) {
 
 /// Head attitude in the world frame, CoreMotion axes (x right, y forward, z up).
 func head(yaw: Double, pitch: Double) -> simd_quatd {
-    HeadSmoother.rotation(yaw: yaw, pitch: pitch, roll: 0)
+    HeadMath.rotation(yaw: yaw, pitch: pitch, roll: 0)
 }
 
 /// Gaze elevation of an orientation, off the forward vector — the same measurement
-/// `HeadTracker.tilt` makes, well-conditioned everywhere on the sphere.
+/// `HeadMath.tilt` makes, well-conditioned everywhere on the sphere.
 func tilt(_ q: simd_quatd) -> Double {
-    let f = HeadSmoother.listener(q).forward
+    let f = HeadMath.listener(q).forward
     return asin(max(-1, min(1, Double(f.y)))) * 180 / .pi
 }
 
@@ -47,7 +47,7 @@ func walk(_ t: Double) -> simd_quatd {
     let yaw = 20 * sin(2 * .pi * t / 9)
     let pitch = 25 + 8 * sin(2 * .pi * t / 6.5)
     let reseat = t >= 100 ? 120.0 : 0.0
-    return HeadSmoother.rotation(yaw: reseat, pitch: 0, roll: 0) * head(yaw: yaw, pitch: pitch)
+    return HeadMath.rotation(yaw: reseat, pitch: 0, roll: 0) * head(yaw: yaw, pitch: pitch)
 }
 
 print("CONTAINS THE BUG — the same trajectory through the old composition")
@@ -56,14 +56,14 @@ print("CONTAINS THE BUG — the same trajectory through the old composition")
 do {
     let ref = head(yaw: 0, pitch: -50)
     let upInReference = ref.conjugate.act(worldUp)
-    var leak = HeadSmoother.identity
+    var leak = HeadMath.identity
     var worst = 0.0
     var t = 0.0
     while t < 130 {
         let att = walk(t)
         let rel = ref.conjugate * att
         let corrected = leak.conjugate * rel
-        leak = HeadSmoother.leaked(leak, toward: rel, up: upInReference, dt: dt,
+        leak = HeadReference.leaked(leak, toward: rel, up: upInReference, dt: dt,
                                    elevation: 30, yaw: 120)
         worst = max(worst, abs(tilt(corrected) - tilt(att)))
         t += dt
@@ -72,16 +72,11 @@ do {
           String(format: "a +120° yaw re-seat put %.0f° of phantom elevation on the field", worst))
 }
 
-/// The 08-21 transport, exactly as `HeadTracker.ingest` composes it.
+/// The 08-21 composition — the shipped `HeadReference`, driven at the sensor rate.
 struct Heading {
-    var leak = HeadSmoother.identity
-    var seeded = false
+    var reference = HeadReference()
     mutating func step(_ att: simd_quatd) -> simd_quatd {
-        if !seeded { leak = HeadSmoother.twist(att, about: worldUp); seeded = true }
-        let corrected = leak.conjugate * att
-        leak = HeadSmoother.leaked(leak, toward: att, up: worldUp, dt: dt,
-                                   elevation: .infinity, yaw: 120)
-        return corrected
+        reference.referenced(att, up: worldUp, dt: dt)
     }
 }
 
@@ -105,7 +100,7 @@ for heading in [0.0, 90.0, 173.0] {
     // settle the seed, then nod 30° down
     _ = h.step(head(yaw: heading, pitch: 0))
     let corrected = h.step(head(yaw: heading, pitch: -30))
-    let e = HeadSmoother.euler(corrected)
+    let e = HeadMath.euler(corrected)
     check(abs(e.pitch + 30) < 0.5 && abs(e.yaw) < 0.5 && abs(e.roll) < 0.5,
           String(format: "heading %+4.0f°", heading),
           String(format: "corrected (yaw %+.2f°, pitch %+.2f°, roll %+.2f°)", e.yaw, e.pitch, e.roll))
@@ -118,7 +113,7 @@ do {
     var h = Heading()
     _ = h.step(head(yaw: 0, pitch: 0))
     let glance = head(yaw: 0, pitch: 60)
-    var corrected = HeadSmoother.identity
+    var corrected = HeadMath.identity
     var t = 0.0
     while t < 60 { corrected = h.step(glance); t += dt }
     check(abs(tilt(corrected) - tilt(glance)) < 0.1, "60° up-glance held 60 s",
@@ -127,10 +122,10 @@ do {
 
     var h2 = Heading()
     _ = h2.step(head(yaw: 0, pitch: 0))
-    var c2 = HeadSmoother.identity
+    var c2 = HeadMath.identity
     t = 0
     while t < 30 { c2 = h2.step(head(yaw: 60, pitch: 0)); t += dt }
-    let kept = HeadSmoother.euler(c2).yaw / 60
+    let kept = HeadMath.euler(c2).yaw / 60
     check(kept > 0.70 && kept < 0.85, "60° yaw glance held 30 s",
           String(format: "keeps %.0f%% (τ = 120 s ⇒ 78%%)", kept * 100))
 }
@@ -145,7 +140,7 @@ do {
         let att = head(yaw: 20 * sin(2 * .pi * t * 2), pitch: 65 + 5 * sin(2 * .pi * t / 3))
         let corrected = h.step(att)
         worstDiff = max(worstDiff, abs(tilt(corrected) - tilt(att)))
-        if let p = previous { worstStep = max(worstStep, HeadSmoother.angle(p, corrected) / dt) }
+        if let p = previous { worstStep = max(worstStep, HeadMath.angle(p, corrected) / dt) }
         previous = corrected
         t += dt
     }
@@ -158,7 +153,7 @@ do {
     var h = Heading()
     let pose = head(yaw: 137, pitch: 40)
     let corrected = h.step(pose)
-    let e = HeadSmoother.euler(corrected)
+    let e = HeadMath.euler(corrected)
     check(abs(e.yaw) < 0.5 && abs(tilt(corrected) - tilt(pose)) < 0.5, "yaw 137°, pitch +40°",
           String(format: "corrected yaw %+.2f°, tilt %+.1f° of the head's %+.1f°",
                  e.yaw, tilt(corrected), tilt(pose)))

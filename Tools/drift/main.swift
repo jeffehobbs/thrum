@@ -2,7 +2,7 @@ import Foundation
 import simd
 
 // Does the drift leak actually drain the drift the flight recorder measured, and
-// does it cost anything a listener would notice — asked of `HeadSmoother.leaked`.
+// does it cost anything a listener would notice — asked of `HeadReference.leaked`.
 //
 // **Conclusion first.** Against the drift rate the 08-14 walk actually recorded,
 // the leak settles where the arithmetic says it should and never moves fast enough
@@ -34,7 +34,7 @@ import simd
 // x right, y forward, z up, so `up` is (0, 0, 1) for a listener who was upright when
 // the reference was captured. On the device it comes from gravity instead, because
 // the reference is captured while the listener looks down at the phone — see
-// `HeadTracker.upInReference`.
+// `HeadTransport.ingest`.
 
 let up = simd_double3(0, 0, 1)
 let elevationTau = 30.0, yawTau = 120.0
@@ -53,20 +53,20 @@ func yawed(_ deg: Double) -> simd_quatd {
 /// What the field is left pointing at, in degrees, given a drift and the leak's
 /// current state — the same `leak⁻¹ · rel` the host hands the smoother.
 func residual(_ leak: simd_quatd, _ rel: simd_quatd) -> Double {
-    HeadSmoother.angle(leak.conjugate * rel, HeadSmoother.identity)
+    HeadMath.angle(leak.conjugate * rel, HeadMath.identity)
 }
 
 /// Drive the leak for `seconds`, with the referenced orientation supplied per sample.
 /// Returns the final residual and the fastest the correction ever moved, in °/s.
 func run(seconds: Double, rel: (Double) -> simd_quatd) -> (residual: Double, peak: Double) {
-    var leak = HeadSmoother.identity
+    var leak = HeadMath.identity
     var peak = 0.0
     var t = 0.0
     while t < seconds {
         let r = rel(t)
-        let next = HeadSmoother.leaked(leak, toward: r, up: up, dt: dt,
+        let next = HeadReference.leaked(leak, toward: r, up: up, dt: dt,
                                        elevation: elevationTau, yaw: yawTau)
-        peak = max(peak, HeadSmoother.angle(leak, next) / dt)
+        peak = max(peak, HeadMath.angle(leak, next) / dt)
         leak = next
         t += dt
     }
@@ -92,12 +92,12 @@ func sampled(_ t: Double) -> Double {
     let i = Int(x)
     return profile[i] + (profile[i + 1] - profile[i]) * (x - Double(i))
 }
-var leak = HeadSmoother.identity
+var leak = HeadMath.identity
 var worst = 0.0, t = 0.0
 while t < 300 {
     let rel = pitch(sampled(t))
     worst = max(worst, residual(leak, rel))
-    leak = HeadSmoother.leaked(leak, toward: rel, up: up, dt: dt,
+    leak = HeadReference.leaked(leak, toward: rel, up: up, dt: dt,
                                elevation: elevationTau, yaw: yawTau)
     t += dt
 }

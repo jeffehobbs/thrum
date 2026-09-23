@@ -3,11 +3,43 @@
 <plist version="1.0">
 <dict>
 	<!-- Granted by Apple on review at developer.apple.com/carplay (app type:
-	     Audio). Attached only when building with CARPLAY=1, because a profile
-	     cannot carry an entitlement the account has not been granted — leaving it
-	     on unconditionally would break device and TestFlight builds until the
-	     request is approved. -->
+	     Audio) and enabled on the App ID. This is the default entitlements file
+	     for the target; `CARPLAY=0 ./build.sh testflight` swaps in
+	     ThrumFlow-NoCarPlay.entitlements, which is this file without this key —
+	     for the one situation where the account cannot sign it and an uploadable
+	     build is needed anyway. Keep the two files in step. -->
 	<key>com.apple.developer.carplay-audio</key>
+	<true/>
+	<!-- Reading heart rate needs this, and the App ID needs HealthKit enabled on
+	     it before a device build will sign. Clinical health records are a
+	     separate, reviewed entitlement and are deliberately not requested: the
+	     app wants a pulse, not a medical history. -->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<key>com.apple.developer.healthkit.access</key>
+	<array/>
+	<!-- Shared with the other Phonotropic apps, so what Cadence has learned about
+	     the listener is common to all of them — their resting rate, how their
+	     heart answers a hill. Only the observations travel; each app keeps its own
+	     tempo mapping, because Thrum folds a pulse into a drone's range and Meter
+	     into a drum machine's, and a range shared between them would be wrong in
+	     both. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.jeffhobbs.phonotropic</string>
+	</array>
+	<!-- Background delivery. Cadence calls
+	     HKHealthStore.enableBackgroundDelivery(for:.heartRate, frequency:.immediate)
+	     in HealthSource.start(), and without this the call fails silently — its
+	     completion handler discards the error — so the anchored query only ever
+	     sees samples written while this process happens to be alive, and
+	     everything the watch recorded in between piles up unseen until the next
+	     foreground launch. Covered by the HEALTHKIT capability already on the
+	     App ID; no separate portal switch. Not to be confused with Series 12's
+	     five-second cadence, which is a query-side thing —
+	     HKQuantitySeriesSampleQueryDescriptor decomposition — and needs no
+	     entitlement. -->
+	<key>com.apple.developer.healthkit.background-delivery</key>
 	<true/>
 </dict>
 </plist>

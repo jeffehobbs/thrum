@@ -42,7 +42,7 @@ struct SimulatedHead {
     /// down-pole on the way — the geometry `Tools/pole` cleared in isolation.
     ///
     /// **Positive**, and the sign was wrong here first time round. Gaze elevation is
-    /// `asin(forward.y)`, and `HeadSmoother.rotation` maps *negative* CoreMotion pitch
+    /// `asin(forward.y)`, and `HeadMath.rotation` maps *negative* CoreMotion pitch
     /// onto a *positive* `forward.y` — so `-75` pointed the simulated head at the sky
     /// and the harness reported a clean result for a gesture it was not performing.
     /// Verified against the node's own readback: pitch −5° yields forward (0, 0.09,

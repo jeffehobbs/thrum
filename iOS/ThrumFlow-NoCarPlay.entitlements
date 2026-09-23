@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ThrumFlow.entitlements without `com.apple.developer.carplay-audio`, and
+	     nothing else. Used only by `CARPLAY=0 ./build.sh testflight`, for the one
+	     situation that flag exists for: profile generation failing on the CarPlay
+	     entitlement, and a build needing to go out while the account side is sorted
+	     out. Everything else here has to stay identical to that file — HealthKit
+	     and the App Group are not optional, and a build missing them cannot read a
+	     heart rate at all. -->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<key>com.apple.developer.healthkit.access</key>
+	<array/>
+	<!-- Shared with the other Phonotropic apps, so what Cadence has learned about
+	     the listener is common to all of them — their resting rate, how their
+	     heart answers a hill. Only the observations travel; each app keeps its own
+	     tempo mapping, because Thrum folds a pulse into a drone's range and Meter
+	     into a drum machine's, and a range shared between them would be wrong in
+	     both. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.jeffhobbs.phonotropic</string>
+	</array>
+	<!-- Background delivery. Cadence calls
+	     HKHealthStore.enableBackgroundDelivery(for:.heartRate, frequency:.immediate)
+	     in HealthSource.start(), and without this the call fails silently — its
+	     completion handler discards the error — so the anchored query only ever
+	     sees samples written while this process happens to be alive, and
+	     everything the watch recorded in between piles up unseen until the next
+	     foreground launch. Covered by the HEALTHKIT capability already on the
+	     App ID; no separate portal switch. Not to be confused with Series 12's
+	     five-second cadence, which is a query-side thing —
+	     HKQuantitySeriesSampleQueryDescriptor decomposition — and needs no
+	     entitlement. -->
+	<key>com.apple.developer.healthkit.background-delivery</key>
+	<true/>
+</dict>
+</plist>

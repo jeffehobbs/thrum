@@ -154,14 +154,14 @@ struct FlightSample {
     var gapMilliseconds = 0.0
     var largestGapMilliseconds = 0.0
     /// Where the head was pointing, and whether the sample stream went quiet — see
-    /// `HeadTracker.peakTilt`. Added for the 08-13 report, whose one reproducible
+    /// `HeadTransport.Diagnostics`. Added for the 08-13 report, whose one reproducible
     /// clue was an angle ("looking all the way down towards my feet") that nothing in
     /// this line was a function of. `stall` is the gap the aggregate `motion` count
     /// cannot show: half a second of silence from the AirPods is 25 samples out of
     /// 1500 and reads as noise, while being long enough for the field to freeze and
     /// then slew to catch up.
     var peakTilt = 0.0
-    /// Where the gaze actually sat, referenced and raw — see `HeadTracker.tiltSpread`.
+    /// Where the gaze actually sat, referenced and raw — see `HeadTransport.Diagnostics`.
     var tiltLow = 0.0, tiltMedian = 0.0, tiltHigh = 0.0
     var rawLow = 0.0, rawMedian = 0.0, rawHigh = 0.0
     var stalls = 0

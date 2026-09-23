@@ -1,3 +1,4 @@
+import Ensemble
 import SwiftUI
 
 // MARK: - Palette
@@ -53,6 +54,8 @@ struct ThrumView: View {
                 parameterColumn.frame(width: 304)
             }
             .padding(14)
+            Divider().overlay(Ink.panelEdge)
+            EnsembleBar(controller: model.ensemble, tint: Ink.amber)
             statusBar
         }
         .background(
@@ -685,24 +688,54 @@ private struct FlowButton: View {
     }
 
     var body: some View {
-        Button { model.flow.toggle() } label: {
-            TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !flow.isRunning)) { _ in
-                Text("\u{262F}")
-                    .font(.system(size: 19))
-                    .foregroundStyle(flow.isRunning
-                                     ? Ink.mode(model.harmony.mode.hue, 1.0, 0.55)
-                                     : Ink.text.opacity(0.55))
-                    .rotationEffect(.degrees(flow.isRunning ? flow.elapsed * 6 : 0))
-                    .shadow(color: flow.isRunning
-                            ? Ink.mode(model.harmony.mode.hue).opacity(0.7) : .clear,
-                            radius: 7)
-                    .frame(width: 30, height: 26)
+        HStack(spacing: 2) {
+            // The thumbs, only while there is something of Flow's to have an
+            // opinion about. Everything behind them is shared with the phone:
+            // the five-second correction window, the vote spread across every
+            // audible quality, the "Noted — more like this" on the status line.
+            if flow.isRunning {
+                thumb("hand.thumbsup",
+                      "More like this. Flow leans toward what is sounding now — today and in future sessions. Pressing the other thumb within five seconds corrects a slip.") {
+                    model.rate(.up)
+                }
+                thumb("hand.thumbsdown",
+                      "Less like this. Flow leans away from what is sounding now and moves on to something else sooner. Pressing the other thumb within five seconds corrects a slip.") {
+                    model.rate(.down)
+                }
             }
+
+            Button { model.flow.toggle() } label: {
+                TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !flow.isRunning)) { _ in
+                    Text("\u{262F}")
+                        .font(.system(size: 19))
+                        .foregroundStyle(flow.isRunning
+                                         ? Ink.mode(model.harmony.mode.hue, 1.0, 0.55)
+                                         : Ink.text.opacity(0.55))
+                        .rotationEffect(.degrees(flow.isRunning ? flow.elapsed * 6 : 0))
+                        .shadow(color: flow.isRunning
+                                ? Ink.mode(model.harmony.mode.hue).opacity(0.7) : .clear,
+                                radius: 7)
+                        .frame(width: 30, height: 26)
+                }
+            }
+            .buttonStyle(.plain)
+            .help(flow.isRunning
+                  ? "Flow is running — voicings, modes, timbres and arpeggios are drifting on their own. Click to take back over; everything stays where it got to."
+                  : "Flow: hand the instrument to itself. Something is always moving and nothing ever jumps, so you can work through it. Different every time.")
+        }
+        .animation(.easeInOut(duration: 0.25), value: flow.isRunning)
+    }
+
+    private func thumb(_ symbol: String, _ hint: String,
+                       _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Ink.text.opacity(0.55))
+                .frame(width: 24, height: 26)
         }
         .buttonStyle(.plain)
-        .help(flow.isRunning
-              ? "Flow is running — voicings, modes, timbres and arpeggios are drifting on their own. Click to take back over; everything stays where it got to."
-              : "Flow: hand the instrument to itself. Something is always moving and nothing ever jumps, so you can work through it. Different every time.")
+        .help(hint)
     }
 }
 
