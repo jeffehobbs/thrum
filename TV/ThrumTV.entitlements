@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Subscriber side of the phone → television Taste sync (`TasteCloud`).
+	     Must match the phone's entitlement character for character — see the
+	     note there. This is the television's only entitlement: no HealthKit,
+	     no App Group, no CarPlay; it has no settings to sync and nothing to
+	     measure. -->
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>$(TeamIdentifierPrefix)com.jeffhobbs.thrumflow</string>
+</dict>
+</plist>

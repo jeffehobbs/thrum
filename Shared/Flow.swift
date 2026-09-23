@@ -288,7 +288,9 @@ public final class FlowDirector: ObservableObject {
         model.setMode(choose(.mode, from: Self.restfulModes))
     }
 
-    private static let lastKeyDefault = "flow.lastKey"
+    /// Public because the television seeds it from the phone's last session
+    /// (via `TasteCloud`) before Flow starts, so the two never open in the same key.
+    public static let lastKeyDefault = "flow.lastKey"
 
     public func stop() {
         guard isRunning else { return }

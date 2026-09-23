@@ -61,6 +61,8 @@ final class FlowHost: ObservableObject {
     static let idleAfter: TimeInterval = 150
 
     let engine = DroneEngine()
+    /// Publisher side of the phone → television sync. See `TasteCloud`.
+    private let cloud = TasteCloud(role: .publisher)
     let model: ThrumModel
 
     /// Idle → playing → paused ⇄ playing. There is no way back to `.idle` short of
@@ -260,7 +262,15 @@ final class FlowHost: ObservableObject {
         // the offline harnesses keep measuring Flow rather than Flow-plus-whatever-
         // was-liked-last-week — persistence is a decision a host makes, and this is
         // the host with the buttons.
-        model = ThrumModel(engine: engine, taste: Taste(store: Taste.defaultStore))
+        let taste = Taste(store: Taste.defaultStore)
+        // The phone is the one writer of the shared book — see `TasteCloud`. Every
+        // local write is mirrored up; a phone that learned for weeks before the
+        // television existed pushes its existing book once, on first launch.
+        taste.mirror = { [cloud] data in cloud.publish(book: data) }
+        if cloud.isAvailable, !cloud.hasBook, !taste.isEmpty, let data = taste.encoded {
+            cloud.publish(book: data)
+        }
+        model = ThrumModel(engine: engine, taste: taste)
         // There is no grid on a phone, so nothing but Flow ever sets the key —
         // which without this means the default one, forever, in every session.
         model.flow.picksKeyOnStart = true
@@ -768,6 +778,9 @@ final class FlowHost: ObservableObject {
         lastError = nil
         routeChanged()
         model.flow.start()
+        // `chooseFreshKey` has just run and written the key; the television reads
+        // it so a room and a pocket never open on the same pitch.
+        cloud.publish(lastKey: UserDefaults.standard.object(forKey: FlowDirector.lastKeyDefault) as? Int)
         transport = .playing
         // Only while something is playing. The pedometer and the HealthKit query
         // are the same kind of cost as the head tracker, and following the pulse of

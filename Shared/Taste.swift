@@ -166,6 +166,34 @@ public final class Taste: ObservableObject {
 
     public var isEmpty: Bool { ups == 0 && downs == 0 }
 
+    /// Set by a host that keeps a copy of the book somewhere else — the phone
+    /// publishes it to iCloud for the television. Called on the IO queue, after
+    /// the local write, with exactly the bytes that were written. The reader of
+    /// a mirror never sets this: see `adopt`.
+    public var mirror: ((Data) -> Void)?
+
+    /// The book as it would be written to disk. `nil` only if it cannot be encoded.
+    public var encoded: Data? { try? JSONEncoder().encode(book) }
+
+    /// Replace everything learned with a book from elsewhere.
+    ///
+    /// This is the television's whole relationship with Taste: it never rates,
+    /// it adopts what the phone rated. Persists to the local store (so a launch
+    /// without iCloud still has the last book) but deliberately does **not**
+    /// `mirror` it back — a reader that writes into the store it reads from is
+    /// a second writer, and the sync model is single-writer by design.
+    /// Returns false if the bytes are not a book.
+    @discardableResult
+    public func adopt(_ data: Data) -> Bool {
+        guard let decoded = try? JSONDecoder().decode(Book.self, from: data) else { return false }
+        book = decoded
+        ups = decoded.ups
+        downs = decoded.downs
+        rebuildSummary()
+        persist(mirroring: false)
+        return true
+    }
+
     // MARK: - Life
 
     private let store: URL?
@@ -204,12 +232,20 @@ public final class Taste: ObservableObject {
         rebuildSummary()
     }
 
-    private func persist() {
-        guard let store, let data = try? JSONEncoder().encode(book) else { return }
+    private func persist(mirroring: Bool = true) {
+        guard let data = try? JSONEncoder().encode(book) else { return }
+        let mirror = mirroring ? self.mirror : nil
+        guard let store else {
+            // An in-memory book can still be mirrored — nothing about the mirror
+            // depends on there being a file.
+            if let mirror { io.async { mirror(data) } }
+            return
+        }
         io.async {
             let folder = store.deletingLastPathComponent()
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try? data.write(to: store, options: .atomic)
+            mirror?(data)
         }
     }
 

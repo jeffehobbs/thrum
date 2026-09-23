@@ -1,6 +1,8 @@
 import Foundation
 import AVFoundation
+#if canImport(CoreMotion)
 import CoreMotion
+#endif
 import simd
 import os
 
@@ -700,6 +702,7 @@ public struct HeadTransport {
 ///
 /// The `@Published` readout is throttled to 10 Hz on the main queue: SwiftUI does not
 /// need fifty redraws a second to show a number that is only there for reassurance.
+#if canImport(CoreMotion)
 public final class HeadTracker: ObservableObject, @unchecked Sendable {
     public enum Status: Equatable, Sendable {
         case unsupported          // no motion-capable headphones on this machine
@@ -874,3 +877,37 @@ public final class HeadTracker: ObservableObject, @unchecked Sendable {
         }
     }
 }
+#else
+/// The television has no CoreMotion and nothing to track: an Apple TV is a fixed
+/// listener in a room, and the field is placed around the speakers rather than
+/// around a head. Same surface as the real tracker so `ThrumModel` and the hosts
+/// compile unchanged — `status` is permanently `.unsupported`, `start()` is a
+/// no-op, and no orientation is ever delivered.
+public final class HeadTracker: ObservableObject, @unchecked Sendable {
+    public enum Status: Equatable, Sendable {
+        case unsupported, needsPermission, denied, idle, tracking
+        public var blurb: String { "No head tracking on this platform." }
+    }
+    public typealias Diagnostics = HeadTransport.Diagnostics
+    public typealias TiltHistogram = HeadTransport.TiltHistogram
+
+    @Published public private(set) var status: Status = .unsupported
+    @Published public private(set) var yaw: Double = 0
+    @Published public private(set) var pitch: Double = 0
+    @Published public private(set) var roll: Double = 0
+    public var onOrientation: ((HeadOrientation) -> Void)?
+    public static let fallbackInterval = 0.033
+
+    public init() {}
+    public func refreshStatus() {}
+    public func start() {}
+    public func stop() {}
+    public func recenter() {}
+    public func drainDiagnostics() -> Diagnostics {
+        var t = HeadTransport()
+        return t.drainDiagnostics()
+    }
+    public var rawTilt: Double { 0 }
+    public func tick() {}
+}
+#endif

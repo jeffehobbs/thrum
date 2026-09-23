@@ -72,6 +72,90 @@ if [[ "$MODE" == "flightlog" ]]; then
   tail -40 "$OUT"
   exit 0
 fi
+# ./build.sh tv [run|device] — Thrum for Apple TV.
+#
+#   tv          Release build for the Apple TV simulator
+#   tv run      …then boot the simulator, install and launch it
+#   tv device   Release build onto the paired Apple TV, installed and launched
+#
+# Release, never Debug: the engine's `-Onone` is ~40× slower and misses the
+# render deadline (see the README), and on a television there is no
+# "listening on the simulator" step to catch it. The Apple TV pairs over the
+# network in Xcode's Devices window once; after that devicectl finds it.
+# `TV_DEV=<udid>` overrides the lookup.
+if [[ "$MODE" == "tv" ]]; then
+  xcodegen generate >/dev/null
+  TV_BUNDLE=com.jeffhobbs.thrumflow
+  if [[ "${2:-}" == device ]]; then
+    # `physical` only: devicectl lists simulators too, and a simulated Apple TV
+    # matches "apple tv" just as well — the first device build installed into
+    # the simulator's container and failed as "does not contain code for this
+    # platform". A physical Apple TV's identifier is 8-16 hex, not a UUID.
+    TV_DEV="${TV_DEV:-$(xcrun devicectl list devices 2>/dev/null \
+            | grep -i 'apple tv' | grep -i physical \
+            | grep -oE '[0-9A-F]{8}-[0-9A-F]{16}' \
+            | head -1)}"
+    if [[ -z "$TV_DEV" ]]; then
+      echo "✗ No Apple TV paired. Pair it once in Xcode: Window > Devices and Simulators," >&2
+      echo "  with the Apple TV on Settings > Remotes and Devices > Remote App and Devices." >&2
+      exit 1
+    fi
+    SIGN_AUTH=()
+    KEYFILE=$(ls ~/.appstoreconnect/private_keys/AuthKey_*.p8 2>/dev/null | head -1)
+    if [[ -n "$KEYFILE" && -f ~/.appstoreconnect/issuer_id ]]; then
+      SIGN_KID=$(basename "$KEYFILE" .p8); SIGN_KID="${SIGN_KID#AuthKey_}"
+      SIGN_AUTH=(-authenticationKeyPath "$KEYFILE"
+                 -authenticationKeyID "$SIGN_KID"
+                 -authenticationKeyIssuerID "$(tr -d '[:space:]' < ~/.appstoreconnect/issuer_id)")
+    fi
+    echo "▸ Building Thrum for the Apple TV…"
+    xcodebuild -project Thrum.xcodeproj -scheme ThrumTV -configuration Release \
+      -destination "generic/platform=tvOS" -derivedDataPath build-tv-device \
+      -allowProvisioningUpdates "${SIGN_AUTH[@]}" -quiet build
+    APP="build-tv-device/Build/Products/Release-appletvos/ThrumTV.app"
+    echo "▸ Installing on $TV_DEV…"
+    xcrun devicectl device install app --device "$TV_DEV" "$APP"
+    xcrun devicectl device process launch --device "$TV_DEV" "$TV_BUNDLE"
+    exit 0
+  fi
+  TV_SIM="${TV_SIM:-Apple TV 4K (3rd generation)}"
+  TV_ID=$(xcrun simctl list devices available \
+          | grep -F "$TV_SIM (" \
+          | grep -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' \
+          | head -1)
+  [[ -n "$TV_ID" ]] || { echo "✗ No \"$TV_SIM\" simulator found." >&2; exit 1; }
+  echo "▸ Building Thrum for $TV_SIM…"
+  xcodebuild -project Thrum.xcodeproj -scheme ThrumTV -configuration Release \
+    -destination "id=$TV_ID" -derivedDataPath build-tv -quiet build
+  if [[ "${2:-}" == run ]]; then
+    APP="build-tv/Build/Products/Release-appletvsimulator/ThrumTV.app"
+    xcrun simctl boot "$TV_ID" 2>/dev/null || true
+    open -a Simulator
+    for _ in {1..60}; do
+      xcrun simctl list devices | grep "$TV_ID" | grep -q Booted && break
+      sleep 0.5
+    done
+    xcrun simctl install "$TV_ID" "$APP"
+    xcrun simctl launch "$TV_ID" "$TV_BUNDLE"
+  fi
+  exit 0
+fi
+
+# ./build.sh tvlog — pull the television's log off the Apple TV.
+#
+# There is no console within reach of an Apple TV, and the one fact that matters
+# — did the room give us six channels — is on the LAUNCH and START lines.
+if [[ "$MODE" == "tvlog" ]]; then
+  TV_DEV="${TV_DEV:-$(xcrun devicectl list devices 2>/dev/null | grep -i 'apple tv' | grep -i physical \
+          | grep -oE '[0-9A-F]{8}-[0-9A-F]{16}' | head -1)}"
+  OUT="${2:-dist/tv.log}"
+  mkdir -p "$(dirname "$OUT")"; rm -f "$OUT"
+  xcrun devicectl device copy from --device "$TV_DEV" \
+    --domain-type appDataContainer --domain-identifier com.jeffhobbs.thrumflow \
+    --source "Library/Caches/Thrum/tv.log" --destination "$OUT"
+  echo; echo "▸ $OUT"; echo; tail -30 "$OUT"
+  exit 0
+fi
 # Only `testflight` reads this: an explicit build number, overriding project.yml.
 BUILD_ARG="${2:-}"
 DEV_ID="${DEV_ID:-Developer ID Application}"   # codesign matches this as a substring

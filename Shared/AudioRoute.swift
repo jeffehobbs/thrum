@@ -25,8 +25,9 @@ import CoreAudio
 ///
 /// The two platforms answer the same question from opposite ends. macOS has to
 /// reconstruct the route from the default device's transport four-char code;
-/// iOS just says `.headphones` or `.builtInSpeaker` outright, via
-/// `AVAudioSession`. Everything downstream of `Kind` — the HRTF mapping, the
+/// iOS and tvOS just say `.headphones`, `.builtInSpeaker` or `.HDMI` outright,
+/// via `AVAudioSession` — so the second branch is `#else`, not `#elseif os(iOS)`,
+/// which is what left the television with no implementation at all. Everything downstream of `Kind` — the HRTF mapping, the
 /// latency warning — is shared, and only the detection is per-platform.
 @MainActor
 public final class AudioRoute: ObservableObject {
@@ -48,7 +49,7 @@ public final class AudioRoute: ObservableObject {
 
 #if os(macOS)
     private var listeners: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
-#elseif os(iOS)
+#else
     private var observers: [NSObjectProtocol] = []
 #endif
 
@@ -202,7 +203,7 @@ public final class AudioRoute: ObservableObject {
         listeners.removeAll()
     }
 
-#elseif os(iOS)
+#else
 
     /// iOS states the route outright, which is the whole difference between the
     /// two platforms here — no transport codes to decode, no device list to scan.
@@ -225,8 +226,12 @@ public final class AudioRoute: ObservableObject {
             return .builtInSpeakers
         case .airPlay:
             return .airPlay
+        case .HDMI:
+            // The television's only real route. Named so the caption can say so,
+            // and so it is not mistaken for the `default` catch-all below.
+            return .external
         default:
-            // USB, HDMI, line out, car audio — all a room rather than a pair of
+            // USB, line out, car audio — all a room rather than a pair of
             // ears, which is the only distinction the HRTF stage cares about.
             return .external
         }

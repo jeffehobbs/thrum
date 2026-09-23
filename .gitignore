@@ -8,3 +8,5 @@ build-ios/
 build-sim/
 build-ipad/
 build-device/
+build-tv/
+build-tv-device/

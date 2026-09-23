@@ -36,5 +36,13 @@
 	     entitlement. -->
 	<key>com.apple.developer.healthkit.background-delivery</key>
 	<true/>
+	<!-- The phone → television Taste sync (`TasteCloud`). The identifier must be
+	     spelled out and identical in ThrumTV.entitlements: the default
+	     `$(CFBundleIdentifier)` expansion would give each app its own store,
+	     which works perfectly and never syncs — Chronological hit exactly that.
+	     The App ID needs iCloud (key-value storage) enabled before a device
+	     build will sign. -->
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>$(TeamIdentifierPrefix)com.jeffhobbs.thrumflow</string>
 </dict>
 </plist>

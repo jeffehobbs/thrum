@@ -839,6 +839,142 @@ built up front rather than lazily — see below.
 
 ---
 
+## Thrum for Apple TV (ThrumTV)
+
+The room-scale build. Same engine, Flow plays it, a Satori-style colour wash shows it, and
+play/pause on the Siri Remote is the only control. There are no settings and
+there will not be: the phone has the switches, and what the listener has
+taught Flow arrives from the phone through iCloud.
+
+```
+./build.sh tv            Release build for the Apple TV simulator
+./build.sh tv run        …boot it, install, launch
+./build.sh tv device     Release build onto the paired Apple TV, installed and launched
+./build.sh tvlog         pull the television's log (dist/tv.log)
+python3 Tools/tvicons.py rebuild the tvOS icon stack from Tools/tvicon
+```
+
+**5.1 is the point.** When the HDMI sink offers six or more channels the
+sixteen spatial buses are rendered by an `AVAudioEnvironmentNode` into an MPEG
+5.1 A format (L R C LFE Ls Rs): tonic in the centre speaker, the mode wrapping
+through L/R to the surrounds, the reverb's wet pair parked wide and a little
+behind. Over a stereo sink it plays the same stereo path the Mac plays over
+speakers. The route decides; nobody has to.
+
+`Tools/surround` is the measurement this rests on — one mono source walked
+round the ring through a real environment node in manual rendering mode at
+5.1, RMS per channel:
+
+```
+swiftc -O -o /tmp/thrumsurround Shared/Spatial.swift Tools/surround/main.swift && /tmp/thrumsurround
+```
+
+Ahead lands 22 dB in front, behind 31 dB in the surrounds, right 21 dB over
+left, nothing in the LFE. Three things it established that `TV/TVHost.swift`
+depends on and that the headers do not say:
+
+- **HRTF and HRTFHQ render to a stereo pair only.** At a 5.1 output the node
+  lists `soundField` and `auto` as applicable — and `soundField` renders
+  *silence*, every channel, every position. `.auto` is the one that actually
+  distributes a point source across six channels. Every bus uses `.auto`.
+- **Connect the main mixer to the output in six channels explicitly.** Left
+  implicit, AVAudioEngine wires it in stereo whatever the hardware has and
+  folds the environment's 5.1 down to L/R before the output node sees it. The
+  symptom is not silence — it is a perfectly good 5.1 image downmixed to
+  stereo, which reads as "auto only pans across the front pair".
+- **The wet pair are two more mono buses**, not a stereo node into the mixer,
+  whose channel mapping into a 5.1 layout would have been a guess. They land
+  in Ls/Rs.
+
+**What the TV Room Apple TV actually reports** (`./build.sh tvlog`): a maximum
+of 32 output channels, and an output node presenting a twelve-channel
+Atmos 7.1.4 bed (`layout 0x0093000C`) — tvOS's own spatial pipeline. The graph
+renders 5.1 into that regardless, on purpose: the brief was 5.1 LPCM, and a
+7.1.4 mix would have put the high tier in the height channels and handed tvOS
+something to encode however its Audio Format setting says. What reaches the
+receiver over eARC is then the Apple TV's business: Settings › Video and Audio
+› Audio Format decides whether that bed leaves as Dolby MAT/Atmos, Dolby
+Digital 5.1 or LPCM, and the receiver's front panel is the only instrument
+that can see it.
+
+**Shared/ compiles unchanged except for two fences.** `HeadTracker` has a
+tvOS stub because CoreMotion does not exist in the tvOS SDK (an Apple TV is a
+fixed listener; the field is placed around the speakers), and `AudioRoute`'s
+AVAudioSession branch is `#else` rather than `#elseif os(iOS)`, which had
+left the television with no implementation at all. None of the packages come
+along — Cadence is heart rate, TipJar and Dashboard are the phone's, Ensemble
+is the Mac's.
+
+**iCloud carries the Taste book, phone → television, one writer.**
+`Shared/TasteCloud.swift`: the phone mirrors every local write of `taste.json`
+into `NSUbiquitousKeyValueStore` with a revision counter (and publishes the key
+it opened in, so the room never starts where the pocket left off); the
+television adopts any newer book read-only and never writes. That is safe
+exactly as long as nothing else writes — the same model as Chronological's
+hidden-photograph list — which is why the remote has no thumbs. Both
+entitlements spell out the same store identifier,
+`$(TeamIdentifierPrefix)com.jeffhobbs.thrumflow`; the default expansion would
+give each app its own store that works perfectly and never syncs. The App ID
+has iCloud (key-value) enabled since 2026-09-22. The Apple TV must be signed
+into the same iCloud account or the log says `iCloud no` and the television
+simply plays an untaught Flow.
+
+**The wash** (`TV/Wash.metal`) is After Dark's Satori, driven by the drone:
+no objects, no edges, a field of colour rippling as waves cross. Each sounding
+voice is one wave — direction from its scale degree, wavelength from its
+octave, strength from the engine's meter (so the tremolo LFOs breathe it),
+half planar and half rings from a centre that wanders. Two sums from the same
+waves, out of phase, bend the hue and lift the brightness separately so colour
+and light move against each other. Palette is the mode's hue bent about a
+quarter of the wheel either way, saturated but not fully, filmic curve and
+Native drawable — 3840×2160 on a 4K set — at 30 fps; the phone's battery
+arithmetic does not apply to a wall plug. (A first version was a lava lamp of
+metaballs, and Jeff's verdict was "kind of horrific"; the Satori direction was
+his.)
+
+**Wide gamut, not HDR — and that is the platform, not a choice.** The drawable
+is sixteen-bit float into Display P3, so the wash's saturated blues and greens
+use the P3 primaries and the panel gets a ten-bit ramp with no dither. It
+cannot go above reference white: `CAMetalLayer.wantsExtendedDynamicRangeContent`
+and `CAEDRMetadata` are `API_UNAVAILABLE(tvos)` — on an Apple TV only HDR
+*video* is allowed brighter than white, and a Metal drawable that tries is
+clamped. `UIScreen.currentEDRHeadroom` still answers on tvOS (the TV Room set
+reports 1.00×; it is logged), but nothing a layer can do consumes it. The
+shader keeps the crest-lift arithmetic as a no-op against `headroom = 1`, so
+the shape of an HDR version is written down for a tvOS that opens the door.
+If the set is in an HDR mode, the Apple TV maps our white into the container
+itself.
+
+Two tvOS things not to re-derive: a full-screen `Button` with `.plain` style
+lays the focus material over its label, and when the label is the screen the
+screen goes white — `BareButtonStyle` draws only the label. And `devicectl list
+devices` lists *simulated* Apple TVs too, so `build.sh` matches `physical` and
+the 8-16 hex identifier a real one has, not a UUID; the first device build
+installed into the simulator's container and failed as "does not contain code
+for this platform".
+
+**The remote.** Select, play/pause and down are caught in UIKit
+(`RemotePresses`, a focusable invisible view overriding `pressesEnded`), not
+in SwiftUI — a `Button` did not reliably receive Select on the device. And the
+finding that cost an afternoon: **once the app is the Now Playing app, tvOS
+delivers the play/pause button as `MPRemoteCommandCenter.pauseCommand` every
+time, whatever state the app is in** — the log showed eleven pauses in a row
+against a stopped drone, never a play, never a toggle. So play, pause and
+toggle commands all call the one `toggle`, which debounces a press that arrives
+by two paths within 400 ms, and `playbackState` is published alongside the
+dictionary. Every path logs its name; a STOP with no press line before it is
+how this was found.
+
+**Measured on the TV Room system (`./build.sh tvlog`, 2026-09-23):** the
+output tap reports Center around −18 dBFS, surrounds −20 to −33, L/R −40, LFE
+silent — the tonic in the centre speaker with the mode wrapped round it, as
+`Tools/surround` predicted. The 5.1 path is real on real hardware.
+
+`-autostart` is a launch argument for the simulator, which cannot be given a
+remote press from a script. As the phone learned, a hook that skips the entry
+point tests everything except whether the app can be started — Select and
+play/pause on the real remote are the only test of that.
+
 ## Testing
 
 `Tools/main.swift` renders the real engine offline to a WAV and reports whether
@@ -1092,6 +1228,8 @@ page with no header on it: `Tools/pdfpng/` plus a glance is the check.
 ---
 
 ## Layout
+
+`TV/` is the Apple TV app (see above); `Tools/surround`, `Tools/tvicon` and `Tools/tvicons.py` are its harness and icon tooling.
 
 ```
 Shared/   Tuning       temperaments and pitch-class tables
