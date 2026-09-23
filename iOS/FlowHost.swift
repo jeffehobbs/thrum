@@ -266,9 +266,14 @@ final class FlowHost: ObservableObject {
         // The phone is the one writer of the shared book — see `TasteCloud`. Every
         // local write is mirrored up; a phone that learned for weeks before the
         // television existed pushes its existing book once, on first launch.
-        taste.mirror = { [cloud] data in cloud.publish(book: data) }
+        taste.mirror = { [cloud] data in
+            cloud.publish(book: data)
+            FlightRecorder.shared.note("iCloud: published book, \(data.count) bytes — \(cloud.report)")
+        }
+        FlightRecorder.shared.note("iCloud at launch: \(cloud.isAvailable ? "available" : "unavailable"), taste \(taste.isEmpty ? "empty" : "\(taste.ups)↑ \(taste.downs)↓") — \(cloud.report)")
         if cloud.isAvailable, !cloud.hasBook, !taste.isEmpty, let data = taste.encoded {
             cloud.publish(book: data)
+            FlightRecorder.shared.note("iCloud: first publish of the existing book, \(data.count) bytes — \(cloud.report)")
         }
         model = ThrumModel(engine: engine, taste: taste)
         // There is no grid on a phone, so nothing but Flow ever sets the key —

@@ -68,6 +68,7 @@ final class TVHost: ObservableObject {
     private var placedField = SpatialField()
     private var placedFieldValid = false
     private var harmonyWatch: AnyCancellable?
+    private var pulseWatch: AnyCancellable?
     private var levelSums: UnsafeMutablePointer<Float>?
     /// `running`, readable off the main actor — the level tap's queue needs it.
     private let playing = OSAllocatedUnfairLock(initialState: false)
@@ -143,7 +144,15 @@ final class TVHost: ObservableObject {
                 if self.running, self.model.harmony.subtitle != self.captionedSubtitle { self.showCaption() }
             }
         updateNowPlaying()
-        TVLog.note("LAUNCH — \(bufferReport), route \(routeName), \(channels) ch, iCloud \(cloud.isAvailable ? "yes" : "no")")
+        TVLog.note("LAUNCH — \(bufferReport), route \(routeName), \(channels) ch, iCloud: \(cloud.report)")
+        // Arpeggios come and go on Flow's own schedule (75–200 s between
+        // decisions, 45% to start, 25% to leave); logging the transitions is how
+        // "I don't hear many arpeggios" becomes a fact about a session.
+        pulseWatch = model.$pulseRunning
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { on in TVLog.note("pulse \(on ? "ON" : "OFF")") }
         // `-autostart`: for the simulator, which cannot be given a remote press
         // from a script. Test hook only — and, as the phone learned, a hook that
         // skips the entry point tests everything except whether the app can be
@@ -537,6 +546,7 @@ final class TVHost: ObservableObject {
 
     func sceneBecameActive() {
         cloud.pull()
+        TVLog.note("active — iCloud: \(cloud.report)")
     }
 
     // MARK: - Caption

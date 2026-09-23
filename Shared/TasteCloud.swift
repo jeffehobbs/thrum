@@ -15,10 +15,11 @@ import Foundation
 /// and a second writer would need one. If the television ever grows a thumb,
 /// this class is where the design changes first.
 ///
-/// Local-first. The book lives in a file on both devices regardless; the store
-/// is consulted only when there is an iCloud account (`ubiquityIdentityToken`),
-/// and everything here is a no-op without one — the app has to be exactly as
-/// good with iCloud off, it just does not sync.
+/// Local-first. The book lives in a file on both devices regardless; on the
+/// phone the store is consulted only when there is an iCloud account
+/// (`ubiquityIdentityToken`), on the television always (see `init` for why),
+/// and everything here is a no-op without an account — the app has to be
+/// exactly as good with iCloud off, it just does not sync.
 public final class TasteCloud: @unchecked Sendable {
     public enum Role { case publisher, subscriber }
 
@@ -37,16 +38,37 @@ public final class TasteCloud: @unchecked Sendable {
 
     public init(role: Role) {
         self.role = role
+#if os(tvOS)
+        // No identity-token test here. `ubiquityIdentityToken` is iCloud *Drive*'s
+        // identity and tvOS has no iCloud Drive, so it is nil on an Apple TV that
+        // is signed in — the first television build logged "iCloud no" against
+        // an account that was absolutely there. The key-value store is its own
+        // service and works regardless; `synchronize()` says whether it did.
+        store = .default
+#else
         // The cheapest honest test for "is there an iCloud account here". Touching
         // `NSUbiquitousKeyValueStore.default` without one is harmless but pointless.
         store = FileManager.default.ubiquityIdentityToken != nil ? .default : nil
+#endif
         if role == .subscriber, let store {
             observer = NotificationCenter.default.addObserver(
                 forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
                 object: store, queue: .main
             ) { [weak self] _ in self?.pull() }
         }
-        store?.synchronize()
+        synchronized = store?.synchronize() ?? false
+    }
+
+    /// Whether the last `synchronize()` was accepted — the only signal tvOS gives
+    /// that the store is backed by an account.
+    public private(set) var synchronized = false
+
+    /// One line for a host's log.
+    public var report: String {
+        guard let store else { return "no store" }
+        let rev = store.longLong(forKey: Self.revisionKey)
+        let bytes = store.data(forKey: Self.bookKey)?.count ?? 0
+        return "store \(synchronized ? "synchronized" : "not synchronized"), book \(bytes) bytes, revision \(rev), lastKey \(lastKey().map(String.init) ?? "none")"
     }
 
     deinit {
@@ -88,7 +110,7 @@ public final class TasteCloud: @unchecked Sendable {
     /// Called on launch and on every external change.
     public func pull() {
         guard role == .subscriber, let store else { return }
-        store.synchronize()
+        synchronized = store.synchronize()
         let revision = store.longLong(forKey: Self.revisionKey)
         guard revision > adoptedRevision, let data = store.data(forKey: Self.bookKey) else { return }
         adoptedRevision = revision
