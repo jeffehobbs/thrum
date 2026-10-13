@@ -25,11 +25,13 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Thrum reads your heart rate and resting heart rate so the drone's pulse can beat with yours, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.</string>
+	<string>With Music Accompanies Heart Rate on, Thrum reads the heart rate your Apple Watch measures during its workout, so the drone's pulse beats with yours, and shows your Activity rings on the watch. Nothing leaves your devices.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Thrum does not save anything to Health. It only reads your heart rate, so the tempo can follow your pulse — nothing is ever written back.</string>
+	<string>With Music Accompanies Heart Rate on, Thrum saves each listen as a workout in Health — its time, heart rate, calories, distance, elevation and route.</string>
 	<key>NSMotionUsageDescription</key>
-	<string>Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head, and — if you ask it to follow your pulse — your movement, so it can estimate your heart rate. Nothing is recorded or sent anywhere.</string>
+	<string>Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head. Nothing is recorded or sent anywhere.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

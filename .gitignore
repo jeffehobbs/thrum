@@ -10,3 +10,4 @@ build-ipad/
 build-device/
 build-tv/
 build-tv-device/
+build-*/

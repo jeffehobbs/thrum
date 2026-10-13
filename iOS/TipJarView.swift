@@ -22,9 +22,8 @@ struct TipJarView: View {
                     VStack(alignment: .leading, spacing: 28) {
                         // Said once, in the first person, and signed.
                         VStack(alignment: .leading, spacing: 14) {
-                            Text("Thrum is a drone that plays itself — Flow drifting the mode, the timbre and the field on its own, so there's always something moving and nothing that jumps.")
-                            Text("I expect no payment for this app, it has been a project of curiosity, but if it has given you something, consider dropping a tip to pay for the next one.")
-                            Text("Thanks, Jeff")
+                            Text("The Phonotropic apps are a labor of love, and will always remain free for all to listen to. However, if they have brought you joy, peace or calm, please consider a donation to continue further development and upkeep.")
+                            Text("Thanks,\nJeff")
                                 .foregroundStyle(.white.opacity(0.5))
                         }
                         .font(.system(.subheadline, design: .rounded))

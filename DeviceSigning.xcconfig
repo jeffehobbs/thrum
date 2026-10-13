@@ -1,0 +1,8 @@
+// Development signing for `./build.sh device` — profiles minted through the
+// App Store Connect API (../cadence/Tools/mint-profile.py), since this Mac has
+// no Xcode account and automatic signing can't create the watch app's or the
+// widget's. A command-line xcconfig applies to every target alike, so each
+// target (ThrumFlow, ThrumWatch, ThrumWorkoutWidget) names its own profile in DEVICE_PROFILE (project.yml) and this just
+// points at it.
+CODE_SIGN_STYLE = Manual
+PROVISIONING_PROFILE_SPECIFIER = $(DEVICE_PROFILE)

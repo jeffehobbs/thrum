@@ -1,5 +1,5 @@
 import SwiftUI
-import Cadence
+import PhonotropicWorkout
 
 /// The gear, and everything behind it.
 ///
@@ -25,10 +25,10 @@ struct SettingsView: View {
     /// would be worse than no line at all.
     @ObservedObject var head: HeadTracker
     /// Here for the tempo readout, which is the one number on this screen that
-    /// moves while it is open — Cadence rewrites it every five seconds.
+    /// moves while it is open — the heart rate rewrites it every second.
     @ObservedObject var model: ThrumModel
     @ObservedObject var route: AudioRoute
-    @ObservedObject var cadence: Cadence
+    @ObservedObject var workout: WorkoutLink
     @Environment(\.dismiss) private var dismiss
 
     private let accent = Color(hue: 0.09, saturation: 0.7, brightness: 0.98)
@@ -38,7 +38,7 @@ struct SettingsView: View {
         self.head = host.model.head
         self.model = host.model
         self.route = host.model.route
-        self.cadence = host.cadence
+        self.workout = host.workout
     }
 
     var body: some View {
@@ -76,10 +76,34 @@ struct SettingsView: View {
             }
         }
         .preferredColorScheme(.dark)
-        // Permission can be granted or taken away in Settings while this app sits
-        // in the background, and nothing tells an app that happened — so the one
-        // screen that reports on permissions re-asks every time it opens.
-        .onAppear { cadence.refreshAuthorizationIfNeeded() }
+        // Turning heart rate on asks first: is there a watch, is a workout
+        // all right.
+        .workoutSetupAlerts(workout)
+        .task { await workout.checkSavedWorkouts() }
+    }
+
+    /// What the workout is filed as in Health. Locked while one is running:
+    /// it applies from the next start.
+    private var activityRow: some View {
+        HStack {
+            Text("ACTIVITY")
+                .font(.system(.caption2, design: .monospaced).weight(.medium))
+                .foregroundStyle(.white.opacity(0.35))
+                .kerning(1)
+            Spacer()
+            Picker("Activity", selection: Binding(get: { workout.activity }, set: { workout.activity = $0 })) {
+                ForEach(PhonotropicActivity.allCases) { kind in
+                    Label(kind.title, systemImage: kind.symbol).tag(kind)
+                }
+            }
+            .pickerStyle(.menu)
+            .tint(.white.opacity(0.6))
+            .disabled(workout.isWorkoutActive)
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 4)
+        .padding(.vertical, 4)
+        .background(Color.white.opacity(0.05))
     }
 
     // MARK: - Tempo
@@ -90,7 +114,7 @@ struct SettingsView: View {
 
             VStack(spacing: 1) {
                 Toggle(isOn: $host.followsPulse) {
-                    Text(Cadence.followsActivityTitle.uppercased())
+                    Text(WorkoutLink.title.uppercased())
                         .font(.system(.caption2, design: .monospaced).weight(.medium))
                         .foregroundStyle(.white.opacity(0.35))
                         .kerning(1)
@@ -100,44 +124,38 @@ struct SettingsView: View {
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.05))
 
-                if !host.followsPulse {
-                    tempoSlider
-                }
+                // The slider stays with the switch on: it's the tempo before the
+                // first reading, and whenever the watch isn't in play. While a
+                // heart rate is setting the tempo it's grayed out.
+                tempoSlider
+                    .disabled(host.isFollowingHeartRate)
+                    .opacity(host.isFollowingHeartRate ? 0.4 : 1)
 
                 if host.followsPulse {
+                    activityRow
                     statRow(label: "TEMPO", value: "\(Int(model.tempo.rounded())) BPM")
                     statRow(label: "SOURCE", value: host.tempoSource)
-
-                    // The tuning screen ships with Cadence, so every app that follows a
-                    // pulse offers the same one — and what is entered in it is shared
-                    // with the others, because it is a fact about the listener rather
-                    // than about Thrum.
-                    NavigationLink {
-                        CadenceTuningView(cadence: cadence)
-                            .navigationTitle("Your pulse")
-                            .navigationBarTitleDisplayMode(.inline)
-                    } label: {
-                        HStack {
-                            Text("TUNE THE ESTIMATE")
+                    statRow(label: "WORKOUT", value: workoutStatus)
+                    if let route = workout.routeStatus {
+                        statRow(label: "ROUTE", value: route)
+                    }
+                    ForEach(Array(workout.savedWorkouts.enumerated()), id: \.offset) { i, line in
+                        statRow(label: i == 0 ? "IN HEALTH" : "", value: line)
+                    }
+                    if let problem = workout.problem {
+                        permissionRow(problem)
+                    }
+                    if workout.isWorkoutActive {
+                        Button(role: .destructive) {
+                            workout.endWorkout()
+                        } label: {
+                            Text("END WORKOUT")
                                 .font(.system(.caption2, design: .monospaced).weight(.medium))
-                                .foregroundStyle(.white.opacity(0.35))
                                 .kerning(1)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.25))
+                                .frame(maxWidth: .infinity)
                         }
-                        .padding(.horizontal, 16)
                         .padding(.vertical, 12)
                         .background(Color.white.opacity(0.05))
-                    }
-                    .buttonStyle(.plain)
-
-                    if cadence.healthAuthorization == .denied {
-                        permissionRow("Health access is off — Thrum is estimating your pulse from movement alone.")
-                    }
-                    if cadence.motionAuthorization == .denied {
-                        permissionRow("Motion access is off — the estimate has almost nothing to go on.")
                     }
                 }
             }
@@ -146,7 +164,7 @@ struct SettingsView: View {
             .padding(.top, 8)
 
             Text(host.followsPulse
-                 ? "The arpeggios beat at your heart rate, folded into a drone's range. A climbing pulse is followed as it climbs; a single wild reading is not followed at all. A phone has no pulse sensor: with a watch writing to Health, Thrum reads it; without one, it estimates from your movement and learns how your heart answers a hill."
+                 ? "Play starts a workout on your Apple Watch, and the arpeggios beat at your heart rate, folded into a drone's range. Stop ends the workout and saves it to Health."
                  : "The tempo is yours: set it with the slider and it stays there.")
                 .font(.system(.footnote, design: .rounded))
                 .foregroundStyle(.white.opacity(0.35))
@@ -292,8 +310,8 @@ struct SettingsView: View {
             .padding(.bottom, 4)
     }
 
-    /// The slider that appears when the tempo is set by hand. Same range and
-    /// default in every Phonotropic app; Cadence owns both.
+    /// The tempo without a heart rate. Same range and default in every
+    /// Phonotropic app.
     private var tempoSlider: some View {
         VStack(spacing: 8) {
             HStack {
@@ -306,12 +324,21 @@ struct SettingsView: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.6))
             }
-            Slider(value: $host.manualTempo, in: Cadence.manualTempoRange, step: 1)
+            Slider(value: $host.manualTempo, in: FlowHost.manualTempoRange, step: 1)
                 .tint(accent)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color.white.opacity(0.05))
+    }
+
+    private var workoutStatus: String {
+        switch workout.phase {
+        case .off: return "Starts with play"
+        case .launching: return "Starting on watch…"
+        case .running: return "Recording"
+        case .paused: return "Waiting for watch"
+        }
     }
 
     private func statRow(label: String, value: String) -> some View {

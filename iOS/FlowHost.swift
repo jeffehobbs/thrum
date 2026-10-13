@@ -1,7 +1,7 @@
 import SwiftUI
 import Dashboard
 import AVFoundation
-import Cadence
+import PhonotropicWorkout
 import Accelerate
 import MediaPlayer
 import Combine
@@ -103,35 +103,38 @@ final class FlowHost: ObservableObject {
     /// has made a decision on the listener's
     /// behalf, and head tracking in particular reads a sensor continuously.
     private enum Key {
-        static let followsPulse = "flow.followsPulse"
-        static let headTracking = "flow.headTracking"
+        static let headTracking = "flow.headTrackingOptedIn"  // new key: earlier installs start off too
         static let sleepMinutes = "flow.sleepMinutes"
+        static let manualTempo = "flow.manualTempo"
     }
 
-    /// "Tempo follows user activity." Cadence's setting, persisted by Cadence;
-    /// these are the app's handles on it so the views bind through `host`.
-    /// On by default, like every Phonotropic app; the Health and Motion prompts
-    /// are asked on the first play, when a tempo that follows you starts to
-    /// matter. Off, the slider sets the tempo — Flow no longer drifts it.
+    /// "Music Accompanies Heart Rate", the workout link's setting. Setting it
+    /// on asks first (is there a watch, is a workout all right, Health), and
+    /// the switch only moves once that's answered. Changes republish through
+    /// `workout.objectWillChange`, which `init` forwards to this object's.
     var followsPulse: Bool {
-        get { cadence.followsActivity }
-        set { cadence.followsActivity = newValue }
+        get { workout.isEnabled }
+        set { newValue ? workout.requestEnable() : workout.disable() }
     }
 
-    /// The tempo when it does not follow. Cadence clamps and persists it.
-    var manualTempo: Double {
-        get { cadence.manualTempo }
-        set { cadence.manualTempo = newValue }
+    /// The tempo without a heart rate.
+    @Published var manualTempo: Double = 112 {
+        didSet {
+            // Clamp by re-assigning only when out of range: on a @Published
+            // property every assignment runs didSet again, so an unconditional
+            // one recurses until the stack runs out.
+            let clamped = min(Self.manualTempoRange.upperBound, max(Self.manualTempoRange.lowerBound, manualTempo))
+            guard clamped == manualTempo else { manualTempo = clamped; return }
+            UserDefaults.standard.set(manualTempo, forKey: Key.manualTempo)
+            applyTempo()
+        }
     }
+    static let manualTempoRange: ClosedRange<Double> = 40...200
 
     /// Whether the field is allowed to stay put while the listener's head turns.
     ///
-    /// On by default: the head-tracked field is the whole point of the spatial
-    /// path — it is what makes the drone sit in the room rather than in the ears —
-    /// and every build before the switch existed tracked unconditionally. The
-    /// Motion prompt appears on first play with headphones, which is when the
-    /// answer means something. Turning it *off* is the real request: a listener
-    /// who wants the drone welded to their ears, on a train or lying down.
+    /// Off by default, so a first launch asks for nothing: turning it on is
+    /// what asks for motion access, on the next play with headphones.
     @Published var headTrackingEnabled: Bool {
         didSet {
             guard headTrackingEnabled != oldValue else { return }
@@ -157,20 +160,18 @@ final class FlowHost: ObservableObject {
     private var sleepUntil: Date?
     private var sleepDisplayTicker: Timer?
 
-    /// Shared with the other Phonotropic apps.
-    ///
-    /// What Cadence learns is about the person, not about this app — their resting
-    /// rate, how their heart answers a hill — so Meter and Thrum are asking the same
-    /// question of the same body and there is no reason each should learn it from
-    /// scratch. Only the observations travel; the tempo mapping below stays private
-    /// to Thrum, because one app counting a heartbeat as a bar and another as a
-    /// quarter note must not share a range.
-    static let group = "group.com.jeffhobbs.phonotropic"
-    let cadence = Cadence(name: "thrum", group: FlowHost.group)
+    /// The watch workout that "Music Accompanies Heart Rate" starts with play.
+    let workout = WorkoutLink(appName: "Thrum", tint: [0.98, 0.66, 0.29])
+    /// Heart rate to tempo: folded by octaves into Thrum's window (below),
+    /// slewed so a jump between readings becomes a glide.
+    private var follower = HeartRateTempo(
+        fold: .init(low: FlowHost.foldLow, high: FlowHost.foldHigh, hysteresis: 6),
+        slewPerMinute: 30)
+    private var tempoTimer: Timer?
 
     /// The window a pulse is folded into before it becomes a tempo.
     ///
-    /// Cadence's own default is 62…148, which is a drum machine's range. Thrum's
+    /// The shared default is 62…148, which is a drum machine's range. Thrum's
     /// pulse presets live between 48 and 108 and Flow roams 46…88, so this is one
     /// octave centred on where a drone's arpeggios actually sit — and wide enough
     /// that an ordinary day, resting to a brisk walk, never folds at all. Folding is
@@ -192,7 +193,7 @@ final class FlowHost: ObservableObject {
     private var artworkTimer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var harmonyWatch: AnyCancellable?
-    private var cadenceWatch: Set<AnyCancellable> = []
+    private var workoutWatch: Set<AnyCancellable> = []
     private var fieldDirty = false
     /// Set only when an interruption is what paused us, so that when it ends we
     /// resume — and a pause the listener asked for stays paused.
@@ -227,14 +228,14 @@ final class FlowHost: ObservableObject {
         // has never touched the switch gets the field, and one who turned it off
         // stays off.
         let defaults = UserDefaults.standard
-        // The switch used to be saved here. It is Cadence's now, and carried
-        // over once: an app updated under a listener keeps doing what it was
-        // doing yesterday. A listener who never had the key gets the default, on.
-        if !cadence.hasStoredSettings, defaults.object(forKey: Key.followsPulse) != nil {
-            cadence.followsActivity = defaults.bool(forKey: Key.followsPulse)
-        }
-        headTrackingEnabled = defaults.object(forKey: Key.headTracking) == nil
-            ? true : defaults.bool(forKey: Key.headTracking)
+        // The heart-rate switch is the workout link's, and starts off: turning
+        // it on asks questions, so it can't carry over silently. The slider
+        // carries over — from this app's own key, else from what Cadence kept.
+        let stored = defaults.double(forKey: Key.manualTempo)
+        manualTempo = stored > 0 ? stored : (Self.cadenceManualTempo() ?? 112)
+        // Off until turned on: turning it on is what asks for motion access,
+        // so a first launch asks for nothing.
+        headTrackingEnabled = defaults.bool(forKey: Key.headTracking)
 
         let session = AVAudioSession.sharedInstance()
         do {
@@ -288,11 +289,10 @@ final class FlowHost: ObservableObject {
         model.onFieldChange = { [weak self] in self?.scheduleFieldUpdate() }
         model.route.onChange = { [weak self] in self?.routeChanged() }
 
-        // The tempo is Cadence's in both positions of the switch — the slider's
+        // The tempo is the host's in both positions of the switch — the slider's
         // when set by hand, the body's when following — so Flow never writes it.
         // The lock goes up before the first value goes in.
         model.tempoIsFollowed = true
-        adoptFoldWindow()
 
         buildGraph()
         watchSession()
@@ -302,7 +302,7 @@ final class FlowHost: ObservableObject {
         // which is a thumbs-down, and the car keeps its labelled 👎 beside it.
         Dashboard.register(self)
         watchHarmony()
-        watchCadence()
+        watchWorkout()
         updateNowPlaying()
         startSleepDisplayTicker()
     }
@@ -625,72 +625,82 @@ final class FlowHost: ObservableObject {
         if running { requestBuffer() }
     }
 
-    // MARK: - Cadence
+    // MARK: - Tempo
 
-    /// Cadence publishes once a second, and the tempo it hands over is already
-    /// smoothed — a jump is held until confirmed, a climb is followed as it climbs.
-    /// So this can be taken as read rather than smoothed again.
-    private func watchCadence() {
-        cadence.$estimate
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                MainActor.assumeIsolated { self?.applyCadence() }
-            }
-            .store(in: &cadenceWatch)
-        // The switch and the slider live in Cadence; the views bind to them
-        // through this object, so its changes have to be this object's changes.
-        cadence.objectWillChange
+    /// Once a second: the heart rate if the watch is sending one, the slider if
+    /// not. The switch lives in the workout link; the views bind to it through
+    /// this object, so its changes have to be this object's changes.
+    private func watchWorkout() {
+        tempoTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyTempo() }
+        }
+        workout.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cadenceWatch)
-        cadence.$settings
-            .map(\.followsActivity)
+            .store(in: &workoutWatch)
+        workout.$isEnabled
             .removeDuplicates()
             .dropFirst()
             .receive(on: RunLoop.main)
-            .sink { [weak self] follows in
+            .sink { [weak self] on in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
-                    if follows { Task { await self.cadence.requestAuthorization() } }
-                    FlightRecorder.shared.note("follow activity \(follows ? "ON" : "OFF")")
+                    FlightRecorder.shared.note("music accompanies heart rate \(on ? "ON" : "OFF")")
+                    self?.updateNowPlaying()
                 }
             }
-            .store(in: &cadenceWatch)
-        applyCadence()
+            .store(in: &workoutWatch)
+        // The watch started or stopped the workout, or the Live Activity's
+        // stop was pressed: the drone does the same.
+        workout.onRemoteStart = { [weak self] in self?.play(from: "the watch") }
+        workout.onRemoteEnd   = { [weak self] in self?.endListening(from: "the watch or the lock screen") }
+        applyTempo()
     }
 
-    /// Hand the pulse's tempo to the clock.
+    /// Hand the tempo to the clock: the pulse, folded, while the watch is
+    /// sending one; the slider otherwise.
     ///
     /// Through `setFollowedTempo` rather than `set(.tempo,)`, which is the only
     /// call in the app that gets past the lock `followsPulse` puts up. The 0.05
     /// deadband is not about cost — `set` already ignores an unchanged value — but
-    /// about the log and the readout, which would otherwise tick every five seconds
+    /// about the log and the readout, which would otherwise tick every second
     /// on a number that had not moved.
-    private func applyCadence() {
-        // Manual or followed, Cadence's tempo is the number to play.
-        let target = cadence.tempo
+    private func applyTempo() {
+        let target: Double
+        if workout.isEnabled, let hr = workout.heartRate {
+            target = follower.update(heartRate: hr)
+        } else {
+            follower.reset(to: manualTempo)
+            target = manualTempo
+        }
         guard target.isFinite, target > 30 else { return }
         if abs(target - model.tempo) > 0.05 { model.setFollowedTempo(target) }
     }
 
-    /// Narrow Cadence's fold window to a drone's range.
-    ///
-    /// Read-modify-write rather than assigning a fresh `TempoMapping`, and that is
-    /// the whole reason this is a function: `trim` lives on the mapping but is
-    /// about the *body* — "the estimate reads high" — and is shared with the other
-    /// Phonotropic apps. Overwriting the struct wholesale would throw away a
-    /// correction the listener made in Meter, silently, on every launch. Guarded so
-    /// it writes only when something actually differs, since the setter saves.
-    private func adoptFoldWindow() {
-        var mapping = cadence.mapping
-        guard mapping.foldLow != Self.foldLow || mapping.foldHigh != Self.foldHigh else { return }
-        mapping.foldLow = Self.foldLow
-        mapping.foldHigh = Self.foldHigh
-        cadence.mapping = mapping
+    /// What Cadence kept as the slider (Application Support/Cadence/thrum.json),
+    /// so an update doesn't reset it.
+    private static func cadenceManualTempo() -> Double? {
+        guard let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                      appropriateFor: nil, create: false),
+              let data = try? Data(contentsOf: base.appendingPathComponent("Cadence/thrum.json")),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let settings = object["settings"] as? [String: Any],
+              let tempo = settings["manualTempo"] as? Double, tempo > 0 else { return nil }
+        return tempo
     }
+
+    /// A heart rate is setting the tempo, so the slider has no say.
+    var isFollowingHeartRate: Bool { workout.isEnabled && workout.heartRate != nil }
 
     /// What the tempo is currently being told by, for the one line in the settings
     /// screen whose job is to say so.
-    var tempoSource: String { cadence.estimate.sourceDescription }
+    var tempoSource: String {
+        guard workout.isEnabled else { return "Manually" }
+        if workout.heartRate != nil { return "Heart rate" }
+        switch workout.phase {
+        case .launching: return "Starting watch"
+        case .running, .paused: return "Waiting for watch"
+        case .off: return "Heart rate on play"
+        }
+    }
 
     /// One line every thirty seconds, which is the whole diagnostic.
     ///
@@ -787,10 +797,8 @@ final class FlowHost: ObservableObject {
         // it so a room and a pocket never open on the same pitch.
         cloud.publish(lastKey: UserDefaults.standard.object(forKey: FlowDirector.lastKeyDefault) as? Int)
         transport = .playing
-        // Only while something is playing. The pedometer and the HealthKit query
-        // are the same kind of cost as the head tracker, and following the pulse of
-        // a listener who is not listening buys nothing.
-        cadence.start(); applyCadence()
+        // With the switch on, playing means a workout on the watch.
+        workout.musicDidStart(); applyTempo()
         // After `running`, not inside the `routeChanged()` above: head tracking is
         // gated on it, and asked a moment too early the answer is always no.
         updateHeadTracking()
@@ -827,6 +835,31 @@ final class FlowHost: ObservableObject {
     /// swell them all back in, which is a noticeable event at both ends. Pause
     /// should be as close to a held breath as the engine allows.
     func pause() {
+        // With the music following the heart rate there is no pause.
+        if stopsRatherThanPauses { endListening(from: "pause"); return }
+        guard transport == .playing else { return }
+        hold()
+        workout.musicDidStop()
+    }
+
+    /// With the music following the heart rate there is no pause: the one
+    /// button plays, or stops — and stop ends the watch's workout and the Live
+    /// Activity with it. Read live, so it follows the setting.
+    var stopsRatherThanPauses: Bool { workout.isEnabled }
+
+    /// Stop listening: the drone is held, the watch's workout ends and is
+    /// saved, the Live Activity goes. Held rather than let go (`stop()`), so the
+    /// ☯ isn't asked for again and play brings the same drone back.
+    func endListening(from source: String) {
+        FlightRecorder.shared.note("\(source) → stop listening")
+        resumeWhenInterruptionEnds = false
+        if transport == .playing { hold() }
+        workout.musicDidStop()
+    }
+
+    /// The sound held and the session left as it is — not the workout, which
+    /// `pause`, `endListening` and an interruption each decide about.
+    private func hold() {
         guard transport == .playing else { return }
         transport = .paused
         FlightRecorder.shared.note("PAUSE")
@@ -841,7 +874,6 @@ final class FlowHost: ObservableObject {
         // Nothing is being placed in a room that has gone quiet, and nothing is
         // being timed to a pulse that has nothing to time.
         updateHeadTracking()
-        cadence.stop()
         artworkTimer?.invalidate()
         updateNowPlaying()
         disarmSleepTimer()
@@ -880,11 +912,8 @@ final class FlowHost: ObservableObject {
         model.flow.resume()
         fade(to: 1, over: Self.fadeIn)
         updateHeadTracking()
-        // Permission can be granted or taken away in Settings while this app is
-        // in the background, and nothing tells an app that happened.
-        cadence.refreshAuthorizationIfNeeded()
-        cadence.start()
-        applyCadence()
+        workout.musicDidStart()
+        applyTempo()
         touched()
         startArtworkRefresh()
         startHeartbeat()
@@ -972,7 +1001,12 @@ final class FlowHost: ObservableObject {
     func toggle(from source: String = "screen") {
         switch transport {
         case .idle:    FlightRecorder.shared.note("\(source) ⏯ → start"); start()
-        case .playing: FlightRecorder.shared.note("\(source) ⏯ → pause"); pause()
+        case .playing:
+            if stopsRatherThanPauses {
+                FlightRecorder.shared.note("\(source) ⏯ → stop"); endListening(from: source)
+            } else {
+                FlightRecorder.shared.note("\(source) ⏯ → pause"); pause()
+            }
         case .paused:  FlightRecorder.shared.note("\(source) ⏯ → resume"); resume()
         }
     }
@@ -1207,9 +1241,12 @@ final class FlowHost: ObservableObject {
                     // `resumeAfterInterruption` saw `audio.isRunning == true` and
                     // declined to restart anything. The drone never came back.
                     FlightRecorder.shared.note("INTERRUPTION began")
+                    // Held, not stopped: a call or Siri is not the listener
+                    // choosing to stop, and with the music following the heart
+                    // rate a stop would end the walk's workout.
                     if self.transport == .playing {
                         self.resumeWhenInterruptionEnds = true
-                        self.pause()
+                        self.hold()
                     }
                 case .ended:
                     // `.shouldResume` is advisory and is frequently absent — for a
@@ -1436,7 +1473,7 @@ final class FlowHost: ObservableObject {
         observers.removeAll()
         model.route.shutdown()
         model.pulse.stop()
-        cadence.stop()
+        tempoTimer?.invalidate()
         audio.stop()
         try? AVAudioSession.sharedInstance().setActive(false)
     }
@@ -1582,6 +1619,8 @@ extension FlowHost: DashboardHost {
 
     func dashboardPlay()  { play(from: "the lock screen, the car or headphones") }
     func dashboardPause() { pause() }
+    func dashboardStop()  { endListening(from: "the lock screen, the car or headphones") }
+    var dashboardStopsRatherThanPauses: Bool { stopsRatherThanPauses }
 
     /// What Flow is actually playing, which in a car is the only thing worth
     /// reading — "DmMaj7 / D Melodic Minor" tells you where the drone has

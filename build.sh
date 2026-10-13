@@ -13,6 +13,8 @@
 #   ./build.sh notarize   Release → Developer ID sign → notarize → staple
 #                         → dist/Thrum-<ver>.zip → docs/appcast.xml
 #   ./build.sh appcast    Regenerate docs/appcast.xml from the existing zip
+#   ./build.sh device     ThrumFlow + its watch app, signed for development and
+#                         installed on the paired iPhone and Apple Watch
 #   ./build.sh testflight ThrumFlow (iOS/iPadOS) → archive → App Store IPA
 #                         → dist/ios/, and uploads if ASC_* are set.
 #                         CarPlay is included; CARPLAY=0 leaves it out.
@@ -83,6 +85,56 @@ fi
 # "listening on the simulator" step to catch it. The Apple TV pairs over the
 # network in Xcode's Devices window once; after that devicectl finds it.
 # `TV_DEV=<udid>` overrides the lookup.
+# ./build.sh device — ThrumFlow, its watch app and its Live Activity, signed
+# manually against API-minted profiles (DeviceSigning.xcconfig): this Mac has no
+# Xcode account, and automatic signing can't create the watch app's or the
+# widget's. Mint or refresh them with ../cadence/Tools/mint-profile.py, using the
+# DEVICE_PROFILE names in project.yml. Release, not Debug: the drone engine
+# can't keep up under -Onone, and a development profile still allows the flight
+# log to be pulled. No `-sdk iphoneos` — it would force the embedded watch app
+# onto the iPhone SDK.
+if [[ "$MODE" == "device" ]]; then
+  DEVICE="${DEVICE:-$(xcrun devicectl list devices 2>/dev/null | awk '/iPhone/ && /physical/ {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) { print $i; exit }}')}"
+  [[ -n "$DEVICE" ]] || { echo "No iPhone paired — plug it in or pair it over Wi-Fi."; exit 1; }
+  # A wedged CoreDevice tunnel reports the phone as unavailable even when it is
+  # sitting unlocked on the desk; restarting the daemons clears it.
+  if xcrun devicectl list devices 2>/dev/null | grep -i iphone | grep -q unavailable; then
+    echo "▸ Device unavailable — restarting CoreDevice…"
+    killall -9 remotepairingd remotepaireddevice CoreDeviceService coredeviced 2>/dev/null || true
+    sleep 6
+  fi
+  command -v xcodegen >/dev/null && xcodegen generate >/dev/null
+  IDENTITY=$(security find-identity -v -p codesigning | grep "Apple Development" | head -1 | sed -E 's/.*"(.+)"/\1/')
+  echo "▸ Building Thrum Flow (+ watch) for $DEVICE"
+  rm -rf build-device/Build/Products/Release-iphoneos/ThrumFlow.app
+  xcodebuild -project Thrum.xcodeproj -scheme ThrumFlow -configuration Release \
+    -destination 'generic/platform=iOS' -derivedDataPath build-device \
+    -xcconfig DeviceSigning.xcconfig CODE_SIGN_IDENTITY="$IDENTITY" build | \
+    grep -E "error:|BUILD" || true
+
+  APP="build-device/Build/Products/Release-iphoneos/ThrumFlow.app"
+  WAPP="$APP/Watch/Thrum Watch.app"
+  [[ -d "$APP" ]] || { echo "Build failed: $APP not found"; exit 1; }
+  for a in "$APP" "$WAPP"; do
+    codesign -d --entitlements - --xml "$a" 2>/dev/null | plutil -p - | grep -q com.apple.developer.healthkit \
+      || { echo "✗ $a is missing the HealthKit entitlement — not installing" >&2; exit 1; }
+  done
+
+  echo "▸ Installing"
+  xcrun devicectl device install app --device "$DEVICE" "$APP"
+  WATCH="${WATCH:-$(xcrun devicectl list devices 2>/dev/null | awk '/Watch/ && /physical/ && /connected|available/ {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) { print $i; exit }}')}"
+  if [[ -n "$WATCH" ]]; then
+    echo "▸ Installing the watch app on $WATCH"
+    xcrun devicectl device install app --device "$WATCH" "$WAPP"
+  else
+    echo "⚠ No watch visible to Xcode; the iPhone installs it (Watch app › Available Apps)."
+  fi
+  echo
+  echo "▸ Installed. Settings › Music Accompanies Heart Rate asks for the watch"
+  echo "  and Health; the watch asks for Location and Motion on its first workout."
+  exit 0
+fi
+
 if [[ "$MODE" == "tv" ]]; then
   xcodegen generate >/dev/null
   TV_BUNDLE=com.jeffhobbs.thrumflow
@@ -386,13 +438,30 @@ if [[ "$MODE" == "testflight" ]]; then
   # heart rate, and the symptom is an estimate that never improves rather than an
   # error. So the default needs no override here; CARPLAY=0 swaps in the file that
   # is the same minus that one key.
+  #
+  # The override goes through THRUMFLOW_ENTITLEMENTS, which only ThrumFlow's
+  # CODE_SIGN_ENTITLEMENTS reads. A command-line CODE_SIGN_ENTITLEMENTS would
+  # apply to every target, so the watch app and the widget would be signed with
+  # the phone's CarPlay, iCloud and App Group entitlements, and the profile
+  # would fail.
   CARPLAY_ARGS=()
   if [[ "$CARPLAY" == "0" ]]; then
     echo "▸ CarPlay entitlement withheld (CARPLAY=0) — the car will not see this build."
-    CARPLAY_ARGS=(CODE_SIGN_ENTITLEMENTS=iOS/ThrumFlow-NoCarPlay.entitlements)
+    CARPLAY_ARGS=(THRUMFLOW_ENTITLEMENTS=iOS/ThrumFlow-NoCarPlay.entitlements)
   else
     echo "▸ CarPlay entitlement attached."
-    CARPLAY_ARGS=(CODE_SIGN_ENTITLEMENTS=iOS/ThrumFlow.entitlements)
+  fi
+
+  # This Mac has no Xcode account, so automatic signing needs the App Store
+  # Connect API key to create the distribution profiles (the watch app and the
+  # widget need their own).
+  XCAUTH=()
+  TF_KEYFILE=$(ls ~/.appstoreconnect/private_keys/AuthKey_*.p8 2>/dev/null | head -1)
+  if [[ -n "$TF_KEYFILE" && -f ~/.appstoreconnect/issuer_id ]]; then
+    TF_KID=$(basename "$TF_KEYFILE" .p8); TF_KID="${TF_KID#AuthKey_}"
+    XCAUTH=(-authenticationKeyPath "$TF_KEYFILE"
+            -authenticationKeyID "$TF_KID"
+            -authenticationKeyIssuerID "$(tr -d '[:space:]' < ~/.appstoreconnect/issuer_id)")
   fi
 
   # An explicit build number overrides project.yml for this archive only, so a
@@ -409,8 +478,8 @@ if [[ "$MODE" == "testflight" ]]; then
   # profile. Signing turned out to be Cloud Managed, so Apple holds the
   # distribution certificate and no local certificate slot is spent.
   xcodebuild -project Thrum.xcodeproj -scheme ThrumFlow -configuration Release \
-    -sdk iphoneos -destination 'generic/platform=iOS' \
-    -archivePath "$ARCHIVE" -allowProvisioningUpdates -quiet \
+    -destination 'generic/platform=iOS' \
+    -archivePath "$ARCHIVE" -allowProvisioningUpdates "${XCAUTH[@]}" -quiet \
     "${CARPLAY_ARGS[@]}" "${BUILD_ARGS[@]}" \
     archive
 
@@ -445,7 +514,7 @@ PLIST
   echo "▸ Exporting IPA…"
   xcodebuild -exportArchive -archivePath "$ARCHIVE" \
     -exportOptionsPlist build-ios/ExportOptions.plist \
-    -exportPath "$EXPORT_DIR" -allowProvisioningUpdates -quiet
+    -exportPath "$EXPORT_DIR" -allowProvisioningUpdates "${XCAUTH[@]}" -quiet
 
   RAW_IPA=$(ls "$EXPORT_DIR"/ThrumFlow.ipa 2>/dev/null | head -1)
   [[ -n "$RAW_IPA" ]] || { echo "✗ No IPA produced." >&2; exit 1; }
@@ -493,6 +562,11 @@ PLIST
   elif [[ -n "$ASC_KEY_ID" && -n "$ASC_ISSUER_ID" ]]; then
     AUTH=(--apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID")
     echo "▸ Using the App Store Connect API key $ASC_KEY_ID."
+  elif [[ -n "${TF_KID:-}" ]]; then
+    # The key the archive was signed with; altool finds the .p8 in
+    # ~/.appstoreconnect/private_keys by its ID.
+    AUTH=(--apiKey "$TF_KID" --apiIssuer "$(tr -d '[:space:]' < ~/.appstoreconnect/issuer_id)")
+    echo "▸ Using the App Store Connect API key $TF_KID."
   fi
 
   if (( ${#AUTH[@]} )); then

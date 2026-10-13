@@ -14,12 +14,12 @@ packages:
   # The lock screen and the car, shared by all five Phonotropic apps.
   Dashboard:
     path: ../dashboard
-  # The pulse, on the phone. Developed alongside Meter and meant for the other
-  # iOS apps — hence a package on disk rather than a folder in here. iOS only:
-  # HealthKit and CMPedometer do not exist on the Mac, and the Mac app is an
-  # instrument somebody is playing, which already has a tempo.
-  Cadence:
-    path: ../cadence
+  # The Phonotropic workout: the watch app, the iPhone's link to it, and the
+  # Live Activity — shared by the Phonotropic apps, hence a package on disk.
+  # It replaced Cadence: the heart rate now comes from a workout the watch
+  # runs while the drone plays.
+  PhonotropicWorkout:
+    path: ../phonotropic-workout
   # The link to Meter and Echo: one tempo, one key, one downbeat across three
   # separate apps running side by side. macOS only — it rests on every
   # participant reading the same mach uptime clock and on a cross-process
@@ -111,9 +111,14 @@ targets:
       - iOS
       - Shared
     dependencies:
-      - package: Cadence
+      - package: PhonotropicWorkout
+        product: PhonotropicWorkout
+      - package: PhonotropicWorkout
+        product: PhonotropicWorkoutActivity
       - package: TipJar
       - package: Dashboard
+      - target: ThrumWatch
+      - target: ThrumWorkoutWidget
     info:
       path: iOS/Info.plist
       properties:
@@ -125,17 +130,13 @@ targets:
         # drone stops the moment the phone locks, which is when a passive
         # ambient app is most likely to be wanted.
         UIBackgroundModes: [audio]
-        # Two features behind one string, and it has to name both or it explains
-        # neither: the same CoreMotion permission covers AirPods orientation (the
-        # spatial field) and the pedometer (the pulse estimate).
-        NSMotionUsageDescription: Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head, and — if you ask it to follow your pulse — your movement, so it can estimate your heart rate. Nothing is recorded or sent anywhere.
-        NSHealthShareUsageDescription: Thrum reads your heart rate and resting heart rate so the drone's pulse can beat with yours, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.
-        # Required even though this app never writes to Health, and the App Store
-        # rejects the build without it (ITMS-90683): the check is on the
-        # *entitlement*, which permits writing, not on whether any write exists in
-        # the code. The string still has to be true and user-facing, so it says
-        # what actually happens.
-        NSHealthUpdateUsageDescription: Thrum does not save anything to Health. It only reads your heart rate, so the tempo can follow your pulse — nothing is ever written back.
+        # CoreMotion, only for AirPods orientation now: the pulse comes from the
+        # watch's workout rather than from an estimate made of movement.
+        NSMotionUsageDescription: Thrum reads the orientation of your AirPods so the drone can stay where it is in the room when you turn your head. Nothing is recorded or sent anywhere.
+        NSHealthShareUsageDescription: With Music Accompanies Heart Rate on, Thrum reads the heart rate your Apple Watch measures during its workout, so the drone's pulse beats with yours, and shows your Activity rings on the watch. Nothing leaves your devices.
+        NSHealthUpdateUsageDescription: With Music Accompanies Heart Rate on, Thrum saves each listen as a workout in Health — its time, heart rate, calories, distance, elevation and route.
+        # The workout on the lock screen and in the Dynamic Island.
+        NSSupportsLiveActivities: true
         UILaunchScreen:
           UIColorName: ""
         # Every orientation on both idioms — this is a thing you prop up and
@@ -185,7 +186,10 @@ targets:
         # from Xcode silently cannot read a heart rate, which looks exactly like the
         # estimate being bad. `CARPLAY=0 ./build.sh testflight` swaps in
         # ThrumFlow-NoCarPlay.entitlements, which is this file minus that one key.
-        CODE_SIGN_ENTITLEMENTS: iOS/ThrumFlow.entitlements
+        # Swapped by `CARPLAY=0 ./build.sh testflight`, through a variable only
+        # this target reads.
+        THRUMFLOW_ENTITLEMENTS: iOS/ThrumFlow.entitlements
+        CODE_SIGN_ENTITLEMENTS: $(THRUMFLOW_ENTITLEMENTS)
         # 1 = iPhone, 2 = iPad. Both, and the layout is centred and unconstrained
         # so there is nothing idiom-specific to maintain.
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -223,6 +227,73 @@ targets:
         # rule; -O keeps the fragment loop tight, which matters at 5 M pixels.
         MTL_ENABLE_DEBUG_INFO: NO
         MTL_FAST_MATH: YES
+        # For `./build.sh device`: profiles minted through the App Store Connect
+        # API (../cadence/Tools/mint-profile.py), named per target and picked up
+        # by DeviceSigning.xcconfig.
+        DEVICE_PROFILE: "Thrum Flow Development"
+
+  # Thrum on the wrist: the shared Phonotropic workout app, with Thrum's name,
+  # color and icon. Started by the phone when play is pressed.
+  ThrumWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - Watch
+    dependencies:
+      - package: PhonotropicWorkout
+        product: PhonotropicWorkoutWatch
+    info:
+      path: Watch/Info.plist
+      properties:
+        CFBundleDisplayName: Thrum
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.jeffhobbs.thrumflow
+        WKRunsIndependentlyOfCompanionApp: false
+        WKBackgroundModes: [workout-processing]
+        UIBackgroundModes: [location]
+        NSHealthShareUsageDescription: Thrum reads your heart rate during its workout and sends it to your iPhone, so the drone beats with your pulse, and shows your Activity rings.
+        NSHealthUpdateUsageDescription: Thrum saves each listen as a workout in Health, with its heart rate, calories, distance, elevation and route.
+        NSLocationWhenInUseUsageDescription: Thrum records the route of your workout, so Fitness can draw it on a map.
+        NSMotionUsageDescription: Thrum uses the barometer to measure the elevation you gain during a workout.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrumflow.watchkitapp
+        PRODUCT_NAME: Thrum Watch
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Watch/ThrumWatch.entitlements
+        MARKETING_VERSION: "1.2.0"
+        CURRENT_PROJECT_VERSION: "15"
+        DEVICE_PROFILE: "Thrum Watch Development"
+
+  # The workout's Live Activity. All of it is the shared one; this contributes
+  # the icon.
+  ThrumWorkoutWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Widget
+    dependencies:
+      - package: PhonotropicWorkout
+        product: PhonotropicWorkoutActivity
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: Thrum Workout
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.thrumflow.WorkoutWidget
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "1.2.0"
+        CURRENT_PROJECT_VERSION: "15"
+        DEVICE_PROFILE: "Thrum Workout Widget Development"
 
   # Thrum for Apple TV — the room-scale build. Same engine, Flow plays it, a
   # lava field shows it, and play/pause on the remote is the only control.
@@ -235,7 +306,7 @@ targets:
   # `Shared/` compiles unchanged except for two fences: `HeadTracker` has a
   # tvOS stub because CoreMotion does not exist in the tvOS SDK, and
   # `AudioRoute`'s AVAudioSession branch is `#else` rather than `#elseif os(iOS)`.
-  # None of the packages come along: Cadence is heart rate, TipJar and Dashboard
+  # None of the packages come along: PhonotropicWorkout is heart rate, TipJar and Dashboard
   # are the phone's, Ensemble is the Mac's.
   ThrumTV:
     type: application
