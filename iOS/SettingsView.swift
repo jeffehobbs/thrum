@@ -27,9 +27,9 @@ struct SettingsView: View {
     /// Here for the tempo readout, which is the one number on this screen that
     /// moves while it is open — the heart rate rewrites it every second.
     @ObservedObject var model: ThrumModel
-    @ObservedObject var route: AudioRoute
     @ObservedObject var workout: WorkoutLink
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmingReset = false
 
     private let accent = Color(hue: 0.09, saturation: 0.7, brightness: 0.98)
 
@@ -37,7 +37,6 @@ struct SettingsView: View {
         self.host = host
         self.head = host.model.head
         self.model = host.model
-        self.route = host.model.route
         self.workout = host.workout
     }
 
@@ -55,6 +54,9 @@ struct SettingsView: View {
                             .padding(.top, 28)
 
                         aboutSection
+                            .padding(.top, 28)
+
+                        resetButton
                             .padding(.top, 28)
 
                         creditsView
@@ -79,7 +81,31 @@ struct SettingsView: View {
         // Turning heart rate on asks first: is there a watch, is a workout
         // all right.
         .workoutSetupAlerts(workout)
-        .task { await workout.checkSavedWorkouts() }
+        .alert("Reset Preferences?", isPresented: $confirmingReset) {
+            Button("Reset", role: .destructive) { host.resetPreferences() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every setting here goes back to how it was at first launch. Your thumbs are kept.")
+        }
+    }
+
+    /// Apart from everything else and behind a confirmation: a reset ends a
+    /// workout that's running.
+    private var resetButton: some View {
+        Button(role: .destructive) {
+            confirmingReset = true
+        } label: {
+            Text("RESET PREFERENCES")
+                .font(.system(.caption2, design: .monospaced).weight(.medium))
+                .kerning(1)
+                .foregroundStyle(.red.opacity(0.8))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20)
     }
 
     /// What the workout is filed as in Health. Locked while one is running:
@@ -134,14 +160,6 @@ struct SettingsView: View {
                 if host.followsPulse {
                     activityRow
                     statRow(label: "TEMPO", value: "\(Int(model.tempo.rounded())) BPM")
-                    statRow(label: "SOURCE", value: host.tempoSource)
-                    statRow(label: "WORKOUT", value: workoutStatus)
-                    if let route = workout.routeStatus {
-                        statRow(label: "ROUTE", value: route)
-                    }
-                    ForEach(Array(workout.savedWorkouts.enumerated()), id: \.offset) { i, line in
-                        statRow(label: i == 0 ? "IN HEALTH" : "", value: line)
-                    }
                     if let problem = workout.problem {
                         permissionRow(problem)
                     }
@@ -192,9 +210,6 @@ struct SettingsView: View {
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.05))
 
-                statRow(label: "OUTPUT", value: route.name.isEmpty ? "—" : route.name)
-                statRow(label: "FIELD", value: fieldState)
-
                 if head.status == .denied {
                     permissionRow("Motion access is off — the field stays welded to your ears.")
                 }
@@ -211,21 +226,6 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
-        }
-    }
-
-    /// What the spatial field is actually doing right now, which is a different
-    /// question from what the switch says — a switch that is on while the phone is
-    /// playing through its own speaker is not tracking anything, and saying so here
-    /// is what stops that reading as a broken feature.
-    private var fieldState: String {
-        if route.isRoom { return "stereo — speakers" }
-        guard host.headTrackingEnabled else { return "head-locked" }
-        switch head.status {
-        case .tracking:    return "head-tracked"
-        case .denied:      return "head-locked — no Motion access"
-        case .unsupported: return "head-locked — these headphones don't report motion"
-        case .needsPermission, .idle: return host.running ? "starting" : "idle"
         }
     }
 
@@ -330,15 +330,6 @@ struct SettingsView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color.white.opacity(0.05))
-    }
-
-    private var workoutStatus: String {
-        switch workout.phase {
-        case .off: return "Starts with play"
-        case .launching: return "Starting on watch…"
-        case .running: return "Recording"
-        case .paused: return "Waiting for watch"
-        }
     }
 
     private func statRow(label: String, value: String) -> some View {

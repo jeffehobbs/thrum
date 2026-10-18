@@ -690,16 +690,17 @@ final class FlowHost: ObservableObject {
     /// A heart rate is setting the tempo, so the slider has no say.
     var isFollowingHeartRate: Bool { workout.isEnabled && workout.heartRate != nil }
 
-    /// What the tempo is currently being told by, for the one line in the settings
-    /// screen whose job is to say so.
-    var tempoSource: String {
-        guard workout.isEnabled else { return "Manually" }
-        if workout.heartRate != nil { return "Heart rate" }
-        switch workout.phase {
-        case .launching: return "Starting watch"
-        case .running, .paused: return "Waiting for watch"
-        case .off: return "Heart rate on play"
-        }
+    /// Settings › Reset Preferences: everything on the settings screen back to
+    /// how a first launch has it — heart rate off (ending a workout that's
+    /// running, which stops the music), tempo 112, head tracking off, no sleep
+    /// timer. Taste is not a preference set here, and it's shared with the
+    /// television, so the thumbs stay.
+    func resetPreferences() {
+        FlightRecorder.shared.note("preferences reset")
+        workout.resetPreferences()
+        manualTempo = 112
+        headTrackingEnabled = false
+        sleepMinutes = 0
     }
 
     /// One line every thirty seconds, which is the whole diagnostic.
@@ -1240,7 +1241,9 @@ final class FlowHost: ObservableObject {
                     // nominally running through the interruption, so the guard in
                     // `resumeAfterInterruption` saw `audio.isRunning == true` and
                     // declined to restart anything. The drone never came back.
-                    FlightRecorder.shared.note("INTERRUPTION began")
+                    let reason = (note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt)
+                        .map(String.init) ?? "none"
+                    FlightRecorder.shared.note("INTERRUPTION began — reason \(reason), transport \(self.transportName)")
                     // Held, not stopped: a call or Siri is not the listener
                     // choosing to stop, and with the music following the heart
                     // rate a stop would end the walk's workout.
@@ -1267,6 +1270,37 @@ final class FlowHost: ObservableObject {
             }
         })
 
+        // iOS 27 deprecates the interruption pair for these two, and on 27 the old
+        // `.ended` has stopped arriving: the log showed `INTERRUPTION began` a second
+        // after every play, never an end, so the drone stayed held. Resumption now
+        // comes from the recommendation, and the reason from the deactivation.
+        if #available(iOS 27.0, *) {
+            observers.append(centre.addObserver(
+                forName: AVAudioSession.didBecomeInactiveNotification, object: session, queue: .main
+            ) { note in
+                let ctx = note.userInfo?[AVAudioSession.deactivationContextKey] as? AVAudioSession.DeactivationContext
+                let source = ctx.map { $0.source == .app ? "app" : "system" } ?? "?"
+                let why = ctx?.interruptionContext.map { "\($0.reason.rawValue)" } ?? "none"
+                FlightRecorder.shared.note("session inactive — source \(source), interruption reason \(why)")
+            })
+            observers.append(centre.addObserver(
+                forName: AVAudioSession.resumptionRecommendationNotification, object: session, queue: .main
+            ) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let ctx = note.userInfo?[AVAudioSession.resumptionContextKey] as? AVAudioSession.ResumptionContext
+                    let should = ctx?.recommendation == .shouldResume
+                    FlightRecorder.shared.note("resumption recommended: \(should), pending \(self.resumeWhenInterruptionEnds)")
+                    // Our own record decides, as for `.ended`: only an interruption
+                    // that held us is undone, never a pause the listener asked for.
+                    if self.resumeWhenInterruptionEnds {
+                        self.resumeWhenInterruptionEnds = false
+                        self.resume()
+                    }
+                }
+            })
+        }
+
         observers.append(centre.addObserver(
             forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main
         ) { [weak self] _ in
@@ -1289,9 +1323,16 @@ final class FlowHost: ObservableObject {
 
         observers.append(centre.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: session, queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
             // AudioRoute is watching this too and will publish the new route;
             // this is here for the engine, which iOS may have stopped underneath us.
+            // The raw reason and port types are logged because `route →` only names the
+            // route: a wireless CarPlay connect near the car is a `CarAudio` port, and
+            // that is the line that would say it was what took the session.
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).map(String.init) ?? "?"
+            let ports = AVAudioSession.sharedInstance().currentRoute.outputs
+                .map { "\($0.portType.rawValue)" }.joined(separator: ",")
+            FlightRecorder.shared.note("route change — reason \(reason), outputs [\(ports)]")
             MainActor.assumeIsolated { self?.recoverIfStopped() }
         })
 
