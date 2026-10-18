@@ -306,9 +306,7 @@ struct FlowView: View {
                     // describing it has scrolled off the bottom of their attention.
                     // Five seconds is long enough that nobody arrives here by
                     // fumbling ⏯ in a pocket, and the dialog is the second lock.
-                    control(!playing ? "play.circle"
-                                : host.stopsRatherThanPauses ? "stop.circle" : "pause.circle", 34,
-                            !playing ? "Play" : host.stopsRatherThanPauses ? "Stop" : "Pause") {
+                    control(!playing ? "play.circle" : "pause.circle", 34, !playing ? "Play" : "Pause") {
                         // A hold that has already fired swallows the tap that ends
                         // it, so the drone does not stop as a parting gift on the way
                         // into the dialog.

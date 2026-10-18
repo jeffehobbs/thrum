@@ -835,18 +835,14 @@ final class FlowHost: ObservableObject {
     /// different intention: fading every voice out means resuming would have to
     /// swell them all back in, which is a noticeable event at both ends. Pause
     /// should be as close to a held breath as the engine allows.
+    ///
+    /// With the music following the heart rate, the watch holds the workout
+    /// too, and resume carries on with it.
     func pause() {
-        // With the music following the heart rate there is no pause.
-        if stopsRatherThanPauses { endListening(from: "pause"); return }
         guard transport == .playing else { return }
         hold()
-        workout.musicDidStop()
+        workout.musicDidPause()
     }
-
-    /// With the music following the heart rate there is no pause: the one
-    /// button plays, or stops — and stop ends the watch's workout and the Live
-    /// Activity with it. Read live, so it follows the setting.
-    var stopsRatherThanPauses: Bool { workout.isEnabled }
 
     /// Stop listening: the drone is held, the watch's workout ends and is
     /// saved, the Live Activity goes. Held rather than let go (`stop()`), so the
@@ -1002,12 +998,7 @@ final class FlowHost: ObservableObject {
     func toggle(from source: String = "screen") {
         switch transport {
         case .idle:    FlightRecorder.shared.note("\(source) ⏯ → start"); start()
-        case .playing:
-            if stopsRatherThanPauses {
-                FlightRecorder.shared.note("\(source) ⏯ → stop"); endListening(from: source)
-            } else {
-                FlightRecorder.shared.note("\(source) ⏯ → pause"); pause()
-            }
+        case .playing: FlightRecorder.shared.note("\(source) ⏯ → pause"); pause()
         case .paused:  FlightRecorder.shared.note("\(source) ⏯ → resume"); resume()
         }
     }
@@ -1660,8 +1651,6 @@ extension FlowHost: DashboardHost {
 
     func dashboardPlay()  { play(from: "the lock screen, the car or headphones") }
     func dashboardPause() { pause() }
-    func dashboardStop()  { endListening(from: "the lock screen, the car or headphones") }
-    var dashboardStopsRatherThanPauses: Bool { stopsRatherThanPauses }
 
     /// What Flow is actually playing, which in a car is the only thing worth
     /// reading — "DmMaj7 / D Melodic Minor" tells you where the drone has
