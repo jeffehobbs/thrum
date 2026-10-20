@@ -3,6 +3,24 @@
     <channel>
         <title>Thrum</title>
         <item>
+            <title>1.5.0</title>
+            <pubDate>Tue, 20 Oct 2026 10:01:26 -0400</pubDate>
+            <link>https://github.com/jeffehobbs/thrum</link>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Thrum in Logic Pro</h2>
+<p>Thrum now carries an Audio Unit instrument. In Logic (or any AUv3 host), pick <b>AU Instruments → Jeff Hobbs → Thrum</b> on a Software Instrument track and play the drone from a keyboard: the same eight timbres, temperaments and thirty-second room, with every control automatable and a preset per timbre.</p>
+<ul>
+<li>Just intonation is tuned to the Key control, and key or temperament changes glide the sounding tones.</li>
+<li>Drone or Accent articulation; mod wheel for jawari, CC11 for swell, sustain pedal, ±2 semitone bend.</li>
+<li><b>Flow, as an option.</b> Switch it on and the unit plays itself, clocked by rendered audio so bounces match real time. Its moves show on the host's parameters for automation, and any control you touch is left alone for five minutes.</li>
+</ul>
+<p>Launch Thrum once after updating so macOS registers the unit. If Logic doesn't list it, use Plug-in Manager → Reset &amp; Rescan.</p>
+]]></description>
+            <enclosure url="https://github.com/jeffehobbs/thrum/releases/download/v1.5.0/Thrum-1.5.0.zip" length="3952099" type="application/octet-stream" sparkle:edSignature="FVWvx1/vX3PUCrx5//MIOdABgqUUvFIcINpNsA2XImq/qNh5kiS+4C2HGhQibCPpUNsUhhpO8O1C7xJTT+kQBQ=="/>
+        </item>
+        <item>
             <title>1.4.1</title>
             <pubDate>Fri, 21 Aug 2026 10:13:04 -0400</pubDate>
             <link>https://github.com/jeffehobbs/thrum</link>
