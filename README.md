@@ -16,7 +16,7 @@ Or press the **☯** and let the instrument play itself.
 
 ## Install
 
-Grab `Thrum-1.4.0.zip` from the [latest
+Grab `Thrum-1.5.0.zip` from the [latest
 release](https://github.com/jeffehobbs/thrum/releases/latest), unzip it and drag
 `Thrum.app` to `/Applications`. It's signed and notarized, so it opens without
 any Gatekeeper detour. macOS 14+, universal — Apple silicon and Intel.
@@ -30,11 +30,16 @@ this download is a one-time manual step.
 A Novation Launchpad X is what makes it an instrument, but the app is playable
 on its own — every control is in the window.
 
+From 1.5.0 the app also carries Thrum as an **Audio Unit instrument** for Logic Pro
+and any other AUv3 host — see [Logic Pro](#logic-pro--thrum-as-an-audio-unit).
+Installing the app installs the unit; launch Thrum once so macOS registers it.
+
 ## Build from source
 
 ```
 ./build.sh            Release build
 ./build.sh run        Release, install to ~/Applications, launch
+./build.sh au         Release, install, register the Audio Unit, run auval
 ./build.sh debug      Debug build — for the debugger, not for the ears
 ./build.sh notarize   Release → Developer ID sign → notarize → dist/Thrum-<ver>.zip
                       → docs/appcast.xml
@@ -187,6 +192,11 @@ short of everyone manually downloading a build signed with a new key. Back it up
 ```
 build/sparkle-tools/2.9.4/generate_keys -x thrum-sparkle-key.txt
 ```
+
+The Audio Unit (`ThrumAU.appex`, inside the app) is the one sandboxed piece —
+hosts refuse to load an audio unit extension that isn't — and it needs no
+entitlement beyond the sandbox itself. `build.sh` signs it first, with its own
+entitlements, before the app around it.
 
 Thrum is signed with the hardened runtime and no entitlements. CoreMIDI
 endpoints and an audio output unit are not restricted resources, and its only
@@ -536,6 +546,54 @@ is yours. And **Presence Cut** has a floor of 0.45, because energy around 3 kHz 
 what makes a long drone tiring and Flow is the one mode that runs for hours
 unattended. Turning Flow off leaves everything exactly where it drifted to, which
 is often a better patch than the one you started from.
+
+---
+
+## Logic Pro — Thrum as an Audio Unit
+
+Thrum ships an AUv3 instrument inside the app. In Logic, make a Software
+Instrument track and pick **AU Instruments → Jeff Hobbs → Thrum**. It's the same
+engine — the eight timbres, the temperaments, the thirty-second room — played
+from a MIDI keyboard instead of the grid.
+
+- **Notes are drone tones.** Each one swells in over Swell, holds for as long as
+  the key is down (or the sustain pedal), and releases over Fade. Velocity
+  scales the level by the Velocity amount. Thirty-two voices; a full chord in
+  every octave is nowhere near the limit.
+- **Tuning is relative to Key.** In a just temperament the key's pitch class
+  lands on concert pitch and every other note is tuned to it — so set Key to the
+  key of the piece. Changing key or temperament glides the tones that are
+  sounding, as it does in the app.
+- **Drone / Accent.** Accent turns every note into a plucked strike that rings
+  out on its own, the tanpura's articulation; the *Tanpura — Plucked* preset
+  starts there.
+- **Mod wheel** is jawari (the sitar buzz), **CC11** swells the whole drone,
+  **CC64** is sustain, and pitch bend is ±2 semitones.
+- Every control is an automatable parameter, and there's a factory preset per
+  timbre.
+
+**Flow is an option, off by default.** Switch it on at the bottom of the Time
+panel (or load the *Flow* preset) and the unit plays itself from silence:
+voicings, modes, timbres, temperaments and the jawari turn over on their own
+clocks, and the controls slide, exactly as in the app. It leaves out what
+doesn't belong in a plugin: Taste, the Pulse arpeggiator (the host has its own)
+and the spatial field. The details that make it behave in a session:
+
+- It runs on rendered audio, not wall time, so an offline bounce is the same
+  journey a real-time pass would be.
+- Its moves show on the host's own parameters, so Latch or Touch automation can
+  record a Flow pass.
+- **Your hands win.** Touch a control — or automate it — and Flow leaves it alone
+  for five minutes.
+- Notes you play sit on top on voices Flow isn't using. The host's all-notes-off
+  on stop doesn't silence Flow; switching it off does, and its voices fade out.
+- The **‹ Mode ›** stepper beside the switch shows where Flow is and can be
+  stepped by hand. The key never moves.
+
+If Logic doesn't list it, run `auval -a | grep Jhob` to check macOS has
+registered it (launching Thrum once does that), then **Logic Pro → Settings →
+Plug-in Manager → Reset & Rescan Selection**. Hosts cache a unit by its version,
+which moves with every release.
 
 ---
 
@@ -1241,6 +1299,7 @@ Shared/   Tuning       temperaments and pitch-class tables
           Pulse        tempo, tap tempo, the four arpeggiator lanes
           Spatial      the ring geometry, and AirPods head tracking
           AudioRoute   what the output actually is; the only per-platform file
+          Voicing      the fifteen voicings, shared by the app and the Audio Unit
           Flow         the director that plays the instrument itself
           Taste        what the thumbs have taught, and how Flow leans on it
           ThrumModel   instrument state; the only writer to the engine
@@ -1256,6 +1315,11 @@ iOS/      ThrumFlowApp the scene, and FlowHost.shared            (iOS/iPadOS)
           Shaders      its fragment shader
           FieldArtwork the same field in Core Graphics, for the car
           CarPlay      the templates
+AudioUnit/ThrumAudioUnit the AUAudioUnit: bus, parameter tree, presets  (AUv3)
+          ThrumKernel  render thread: MIDI → voices, tuning, sample-accurate events
+          FlowCore     Flow rebuilt for the render thread, clocked by samples
+          ThrumParameters the parameter specs and factory presets
+          ThrumAUViewController the plugin window
 ```
 
 ## Ensemble — playing with the other two

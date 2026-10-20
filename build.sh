@@ -10,6 +10,8 @@
 #   ./build.sh            Release build
 #   ./build.sh run        Release, install to ~/Applications, launch
 #   ./build.sh debug      Debug build — for the debugger, not for the ears
+#   ./build.sh au         Release, install to ~/Applications, register the
+#                         Thrum audio unit (aumu thrm Jhob) and auval it
 #   ./build.sh notarize   Release → Developer ID sign → notarize → staple
 #                         → dist/Thrum-<ver>.zip → docs/appcast.xml
 #   ./build.sh appcast    Regenerate docs/appcast.xml from the existing zip
@@ -283,7 +285,15 @@ CONFIG=Release
 sign_inside_out() {
   local app="$1"
   local sparkle="$app/Contents/Frameworks/Sparkle.framework"
+  local appex="$app/Contents/PlugIns/ThrumAU.appex"
   local target
+  # The audio unit extension first of all, and with its entitlements named
+  # explicitly: re-signing drops whatever the build embedded, and an appex
+  # without the sandbox entitlement is one every host refuses to load.
+  if [[ -e "$appex" ]]; then
+    codesign --force --timestamp --options runtime \
+      --entitlements AudioUnit/ThrumAU.entitlements --sign "$DEV_ID" "$appex"
+  fi
   # Innermost first. Order within this list matters.
   for target in \
     "$sparkle/Versions/B/XPCServices/Downloader.xpc" \
@@ -638,6 +648,33 @@ fi
 
 echo "Built: $APP  ($CONFIG, universal: $ARCHS_BUILT)"
 [[ "$CONFIG" == "Debug" ]] && echo "  ⚠︎  Debug build — the engine will glitch. Use ./build.sh for Release."
+
+# ./build.sh au — install, register the audio unit, and run auval on it.
+#
+# Registered by hand rather than by launching the app: macOS finds an audio unit
+# extension through its containing app being known to Launch Services, and
+# pluginkit is told directly so nobody has to open Thrum for Logic to see it.
+# The registrar caches components, so it is restarted to drop the old ones.
+# Logic keeps a cache of its own and rescans a unit when its version changes,
+# or from Settings → Plug-in Manager → Reset & Rescan Selection.
+if [[ "$MODE" == "au" ]]; then
+  mkdir -p "$HOME/Applications"
+  ditto "$APP" "$HOME/Applications/Thrum.app"
+  echo "Installed: ~/Applications/Thrum.app"
+  # The copy under build/ is known to Launch Services too, and pluginkit will
+  # happily pick it — then a clean build pulls the unit out from under Logic.
+  LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  pluginkit -r "$APP/Contents/PlugIns/ThrumAU.appex" 2>/dev/null || true
+  "$LSR" -u "$APP" 2>/dev/null || true
+  "$LSR" -f -R "$HOME/Applications/Thrum.app"
+  pluginkit -a "$HOME/Applications/Thrum.app/Contents/PlugIns/ThrumAU.appex"
+  killall -9 AudioComponentRegistrar 2>/dev/null || true
+  sleep 2
+  pluginkit -m -v -i com.jeffhobbs.thrum.audiounit || true
+  echo "▸ auval aumu thrm Jhob"
+  auval -v aumu thrm Jhob | tail -12
+  exit "${pipestatus[1]}"
+fi
 
 if [[ "$MODE" == "run" ]]; then
   osascript -e 'quit app "Thrum"' 2>/dev/null || true

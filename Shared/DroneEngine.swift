@@ -478,6 +478,11 @@ public final class DroneEngine {
         events.push(DroneEvent(.retune, pad: pad, value: frequency))
     }
 
+    /// Retune with no glide. See `DroneEvent.Kind.place`.
+    public func place(pad: Int, frequency: Double) {
+        events.push(DroneEvent(.place, pad: pad, value: frequency))
+    }
+
     /// Strike an accent on a voice. Safe to call from the pulse queue — the
     /// event queue is the only thing it touches.
     public func pluck(pad: Int, velocity: Double) {
@@ -535,6 +540,14 @@ public final class DroneEngine {
             if !voices[p].active || (voices[p].env < 1e-5 && voices[p].pluck < 1e-5) {
                 voices[p].freq = e.value
             }
+        case .place:
+            // The audio unit's: a voice taken over for a different note, and the
+            // pitch wheel. Either way a glide is the wrong answer — the first is a
+            // portamento nobody played, the second a bend that arrives half a
+            // second late.
+            guard p >= 0, p < Self.voiceCount, e.value > 8, e.value < 20_000 else { return }
+            voices[p].targetFreq = e.value
+            voices[p].freq = e.value
         case .pluck:
             guard p >= 0, p < Self.voiceCount else { return }
             voices[p].pluckPeak = Float(min(max(e.value, 0), 1))

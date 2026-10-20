@@ -380,17 +380,10 @@ public final class FlowDirector: ObservableObject {
         }
     }
 
-    /// Voicings Flow will open with or move to. Weighted to the sustained ones —
-    /// these are the ones that hold up for minutes without asking anything.
-    private static let openings: [ThrumModel.Voicing] = [
-        .tanpura, .openFifths, .pedalRoot, .modalSpread, .aitake,
-        .hardanger, .guqin, .launeddas, .highland, .gyuto, .didgeridoo, .uilleann,
-    ]
-
-    /// Modes Flow will move between. The tense ones — Locrian, Altered,
-    /// Diminished, Whole Tone — are left out: they are good to play *over* and
-    /// wearing to sit *inside* for an hour.
-    private static let restfulModes = [0, 1, 3, 4, 5, 11, 14, 8]
+    /// Which voicings and modes Flow chooses among. Kept beside the voicings in
+    /// `Shared/Voicing.swift`, which the audio unit's Flow reads too.
+    private static let openings = DroneVoicing.flowOpenings
+    private static let restfulModes = DroneVoicing.flowModes
 
     private func perform(_ g: Gesture) {
         switch g {
